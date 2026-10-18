@@ -36,6 +36,11 @@ async def migrate(database: Database | None = None) -> dict[str, Any]:
     database = database or db
     legacy = _legacy_path()
 
+    # This importer only targets the legacy SQLite store. Never copy its rows
+    # into a configured PostgreSQL database during application startup.
+    if database.backend != "sqlite":
+        return {"status": "skipped_non_sqlite_backend"}
+
     if not legacy.exists():
         return {"status": "no_legacy_file"}
 

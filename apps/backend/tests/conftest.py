@@ -152,6 +152,9 @@ async def isolated_backend_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[Any]:
     """Isolate config, crypto and every imported database alias per test."""
+    # Existing endpoint tests model trusted local development. Hosted-mode auth
+    # is covered explicitly by test_auth.py and never bypassed in production.
+    monkeypatch.setenv("APP_ENV", "development")
     import app.config as config_module
     import app.database as database_module
     from app import crypto

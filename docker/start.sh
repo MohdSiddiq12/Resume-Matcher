@@ -11,8 +11,13 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Internal port configuration for single-port deployment.
-FRONTEND_PORT="3000"
+FRONTEND_PORT="${PORT:-3000}"
 BACKEND_PORT="8000"
+
+if ! [[ "$FRONTEND_PORT" =~ ^[0-9]+$ ]] || [ "$FRONTEND_PORT" -lt 1 ] || [ "$FRONTEND_PORT" -gt 65535 ]; then
+    error "PORT must be a valid TCP port number (1-65535)."
+    exit 1
+fi
 
 # Print banner
 print_banner() {

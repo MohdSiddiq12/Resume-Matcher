@@ -1,6 +1,7 @@
 """Tests for the Fernet API-key encryption helper."""
 
 import pytest
+from cryptography.fernet import Fernet
 
 from app import crypto
 from app.config import settings
@@ -16,6 +17,45 @@ def isolated_secret(tmp_path, monkeypatch):
 
 
 class TestCrypto:
+    def test_uses_configured_environment_key_without_writing_file(
+        self, isolated_secret, monkeypatch
+    ):
+        key = Fernet.generate_key().decode("ascii")
+        monkeypatch.setattr(settings, "encryption_key", key)
+
+        ciphertext = crypto.encrypt("sk-stable")
+
+        assert crypto.decrypt(ciphertext) == "sk-stable"
+        assert not (isolated_secret / ".secret_key").exists()
+
+    def test_invalid_configured_key_fails_without_replacement(
+        self, isolated_secret, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "encryption_key", "invalid-key")
+
+        with pytest.raises(ValueError, match="ENCRYPTION_KEY"):
+            crypto.encrypt("sk-secret")
+
+        assert not (isolated_secret / ".secret_key").exists()
+
+    def test_configured_key_change_reloads_key(self, isolated_secret, monkeypatch):
+        first_key = Fernet.generate_key().decode("ascii")
+        second_key = Fernet.generate_key().decode("ascii")
+        monkeypatch.setattr(settings, "encryption_key", first_key)
+        ciphertext = crypto.encrypt("sk-secret")
+
+        monkeypatch.setattr(settings, "encryption_key", second_key)
+        assert crypto.decrypt(ciphertext) == ""
+
+    def test_absent_configured_key_uses_local_file_fallback(
+        self, isolated_secret, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "encryption_key", None)
+        ciphertext = crypto.encrypt("sk-local")
+
+        assert crypto.decrypt(ciphertext) == "sk-local"
+        assert (isolated_secret / ".secret_key").exists()
+
     def test_round_trip(self, isolated_secret):
         ciphertext = crypto.encrypt("sk-super-secret")
         assert ciphertext  # non-empty

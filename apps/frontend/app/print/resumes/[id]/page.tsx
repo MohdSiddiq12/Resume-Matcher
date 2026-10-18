@@ -14,6 +14,7 @@ import { translate } from '@/lib/i18n/server';
 import { resolveLocale } from '@/lib/i18n/locale';
 import { withLocalizedDefaultSections } from '@/lib/utils/section-helpers';
 import { runningHeaderCss } from '@/lib/print/running-header';
+import { headers } from 'next/headers';
 
 type PageProps = {
   params: Promise<{ id: string }>;
@@ -83,7 +84,11 @@ async function fetchResumeData(id: string, draftToken?: string): Promise<ResumeD
     draftToken && /^[a-f0-9]{32}$/.test(draftToken)
       ? `${API_BASE}/resumes/render-drafts/${draftToken}`
       : `${API_BASE}/resumes?resume_id=${encodeURIComponent(id)}`;
-  const res = await fetch(url, { cache: 'no-store' });
+  const requestHeaders = await headers();
+  const res = await fetch(url, {
+    cache: 'no-store',
+    headers: { cookie: requestHeaders.get('cookie') || '' },
+  });
   if (!res.ok) {
     throw new Error(`Failed to load resume (status ${res.status}).`);
   }

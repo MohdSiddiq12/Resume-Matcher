@@ -79,8 +79,23 @@ describe('api client', () => {
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toBe('/api/v1/jobs/upload');
       expect(init.method).toBe('POST');
-      expect((init.headers as Record<string, string>)['Content-Type']).toBe('application/json');
+      expect(new Headers(init.headers).get('Content-Type')).toBe('application/json');
       expect(init.body).toBe(JSON.stringify({ job_descriptions: ['x'] }));
+    });
+
+    it('adds the CSRF cookie value to same-origin state-changing requests', async () => {
+      document.cookie = 'rm_csrf=csrf-test-token';
+      await apiPost('/jobs/upload', { job_descriptions: ['x'] });
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('csrf-test-token');
+      expect(init.credentials).toBe('same-origin');
+    });
+
+    it('does not send the CSRF token to an external URL', async () => {
+      document.cookie = 'rm_csrf=csrf-test-token';
+      await apiFetch('https://example.com/update', { method: 'POST' });
+      const init = fetchMock.mock.calls[0][1] as RequestInit;
+      expect(new Headers(init.headers).has('X-CSRF-Token')).toBe(false);
     });
   });
 

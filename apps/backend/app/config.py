@@ -435,6 +435,9 @@ class Settings(BaseSettings):
     # Optional PostgreSQL backend. Unset: SQLite in data_dir.
     database_url: str | None = None
     database_schema: str | None = None
+    # Stable Fernet key for hosted deployments. When unset, crypto.py retains
+    # its owner-only local key file behavior.
+    encryption_key: str | None = None
 
     @field_validator("database_url", mode="before")
     @classmethod

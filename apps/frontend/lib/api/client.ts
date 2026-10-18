@@ -141,8 +141,30 @@ export async function apiFetch(
     controller.abort();
   }, timeout);
 
+  const method = (options?.method || 'GET').toUpperCase();
+  const headers = new Headers(options?.headers);
+  const sameOriginRequest =
+    !isAbsoluteUrl ||
+    (typeof window !== 'undefined' &&
+      new URL(url, window.location.href).origin === window.location.origin);
+  if (
+    sameOriginRequest &&
+    !['GET', 'HEAD', 'OPTIONS'].includes(method) &&
+    typeof document !== 'undefined'
+  ) {
+    const csrfCookie = document.cookie.split('; ').find((part) => part.startsWith('rm_csrf='));
+    if (csrfCookie && !headers.has('X-CSRF-Token')) {
+      headers.set('X-CSRF-Token', decodeURIComponent(csrfCookie.slice('rm_csrf='.length)));
+    }
+  }
+
   try {
-    const request = fetch(url, { ...options, signal: controller.signal }).then(bufferResponse);
+    const request = fetch(url, {
+      ...options,
+      headers,
+      credentials: 'same-origin',
+      signal: controller.signal,
+    }).then(bufferResponse);
     return await Promise.race([request, cancellation]);
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {

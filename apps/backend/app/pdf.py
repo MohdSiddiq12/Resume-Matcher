@@ -452,6 +452,26 @@ async def _render_with_browser(
     page: Page = await _await_before_deadline(
         browser.new_page(), work_deadline, "page creation"
     )
+    from app.auth import current_session_cookie
+
+    session_cookie = current_session_cookie()
+    if session_cookie:
+        from urllib.parse import urlsplit
+
+        origin = urlsplit(url)
+        if origin.scheme in ("http", "https") and origin.hostname:
+            await page.context.add_cookies(
+                [
+                    {
+                        "name": "rm_session",
+                        "value": session_cookie,
+                        "url": f"{origin.scheme}://{origin.netloc}",
+                        "httpOnly": True,
+                        "secure": origin.scheme == "https",
+                        "sameSite": "Strict",
+                    }
+                ]
+            )
     render_error: BaseException | None = None
     try:
         return await _render_page_to_pdf(

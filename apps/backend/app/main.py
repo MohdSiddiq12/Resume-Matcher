@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
+from app import auth
 from app.ai_budget import operation_error_content
 from app.config import settings
 from app.database import DatabaseBusyError, db
@@ -24,6 +25,7 @@ from app.host_guard import HostGuardMiddleware
 from app.pdf import close_pdf_renderer
 from app.routers import (
     applications_router,
+    auth_router,
     ats_router,
     chatgpt_callback_router,
     chatgpt_router,
@@ -49,6 +51,7 @@ _configure_application_logging()
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Application lifespan manager."""
+    auth.validate_auth_configuration()
     # Startup
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     if settings.database_url:
@@ -102,6 +105,7 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+app.add_middleware(auth.AuthenticationMiddleware)
 
 
 @app.exception_handler(DatabaseBusyError)
@@ -131,6 +135,7 @@ app.add_middleware(HostGuardMiddleware, allowed_hosts=settings.effective_allowed
 
 # Include routers
 app.include_router(health_router, prefix="/api/v1")
+app.include_router(auth_router, prefix="/api/v1")
 app.include_router(config_router, prefix="/api/v1")
 app.include_router(resumes_router, prefix="/api/v1")
 app.include_router(jobs_router, prefix="/api/v1")

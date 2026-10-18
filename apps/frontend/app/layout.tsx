@@ -8,6 +8,7 @@ import {
   Space_Grotesk,
 } from 'next/font/google';
 import { THEME_COLOR } from '@/lib/theme-color';
+import AuthGate from '@/components/auth/auth-gate';
 import './(default)/css/globals.css';
 
 const spaceGrotesk = Space_Grotesk({
@@ -87,7 +88,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body
         className={`${spaceGrotesk.variable} ${lato.variable} ${raleway.variable} ${notoSansSC.variable} ${notoSansKR.variable} ${notoSansJP.variable} antialiased bg-canvas text-ink-soft min-h-full`}
       >
-        {children}
+        <AuthGate>{children}</AuthGate>
       </body>
     </html>
   );

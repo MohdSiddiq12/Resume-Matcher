@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 _fernet: Fernet | None = None
 _secret: bytes | None = None
-_loaded_from: Path | None = None
+_loaded_from: tuple[Path, str | None] | None = None
 
 
 def _secret_path() -> Path:
@@ -69,11 +69,26 @@ def _write_secret(path: Path, key: bytes, *, exclusive: bool = False) -> None:
 
 
 def _load_fernet() -> Fernet:
-    """Load (or generate) the Fernet instance, cached per secret path."""
+    """Load the configured key or local key file, cached by its source."""
     global _fernet, _secret, _loaded_from
     path = _secret_path()
-    if _fernet is not None and _loaded_from == path:
+    configured_key = settings.encryption_key
+    cache_key = (path, configured_key)
+    if _fernet is not None and _loaded_from == cache_key:
         return _fernet
+
+    if configured_key is not None:
+        try:
+            key = configured_key.encode("ascii")
+            fernet = Fernet(key)
+        except (UnicodeEncodeError, ValueError, TypeError):
+            # Never replace an explicitly configured key; doing so would make
+            # existing ciphertext unrecoverable without fixing the setting.
+            raise ValueError("ENCRYPTION_KEY must be a valid Fernet key.") from None
+        _fernet = fernet
+        _secret = key
+        _loaded_from = cache_key
+        return fernet
 
     if path.exists():
         key = path.read_bytes().strip()
@@ -104,7 +119,7 @@ def _load_fernet() -> Fernet:
         _write_secret(path, key)
         _fernet = Fernet(key)
     _secret = key
-    _loaded_from = path
+    _loaded_from = cache_key
     return _fernet
 
 

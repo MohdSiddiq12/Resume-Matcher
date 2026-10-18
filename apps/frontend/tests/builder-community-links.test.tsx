@@ -51,23 +51,16 @@ vi.mock('@/hooks/use-regenerate-wizard', () => ({
 
 afterEach(cleanup);
 
-describe('builder community links', () => {
-  it('puts Join Discord and Star on GitHub in the header toolbar, with no footer bar', async () => {
+describe('builder header', () => {
+  it('keeps community and support links out of the header toolbar', async () => {
     const { ResumeBuilder } = await import('@/components/builder/resume-builder');
     const { container } = render(<ResumeBuilder />);
 
-    const discord = screen.getByRole('link', { name: 'community.joinDiscord' });
-    const star = screen.getByRole('link', { name: 'community.starOnGithub' });
-    expect(discord).toHaveAttribute('href', 'https://dsc.gg/resume-matcher');
-    expect(star).toHaveAttribute('href', 'https://github.com/srbhr/Resume-Matcher');
-    // Quiet ghost actions inside the page header, not the resume canvas, and no new footer.
+    expect(
+      screen.queryByRole('link', { name: /community\.(joinDiscord|starOnGithub)/ })
+    ).toBeNull();
     const header = container.querySelector('header');
-    expect(header).toContainElement(discord);
-    expect(header).toContainElement(star);
-    expect(discord).toHaveClass('bg-transparent');
-    // Below 2xl the label collapses to an icon (still the accessible name) so the header stays one row.
-    expect(discord).toHaveAttribute('title', 'community.joinDiscord');
-    expect(screen.getByText('community.joinDiscord')).toHaveClass('max-2xl:sr-only');
+    expect(header).not.toHaveTextContent(/community\.(joinDiscord|starOnGithub)/);
     expect(container.querySelector('footer')).toBeNull();
   });
 });

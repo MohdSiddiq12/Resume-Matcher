@@ -54,7 +54,7 @@ import { SegmentedControl } from '@/components/ui/segmented-control';
 import { BrandIcon, hasBrandIcon } from '@/components/ui/brand-icon';
 import { PageFrame } from '@/components/ui/page-frame';
 import { PageHeader } from '@/components/ui/page-header';
-import { SettingsAbout, SettingsSupportStrip } from '@/components/settings/community';
+import { SettingsAbout } from '@/components/settings/community';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Dropdown } from '@/components/ui/dropdown';
 import {
@@ -821,8 +821,6 @@ export default function SettingsPage() {
         </PageHeader>
 
         <div className="px-8 py-8 md:px-12 space-y-8">
-          <SettingsSupportStrip />
-
           {/* API Key Not Configured Warning */}
           {!statusLoading && systemStatus && !systemStatus.llm_configured && (
             <Alert tone="warning">

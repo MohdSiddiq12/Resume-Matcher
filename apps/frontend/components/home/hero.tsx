@@ -2,7 +2,6 @@
 
 import React from 'react';
 import Link from 'next/link';
-import { CommunityLinks } from '@/components/common/community-links';
 import { BackgroundEffect } from '@/components/effects/background-effect';
 import { buttonClass } from '@/components/ui/button';
 import { useBlockDissolveNavigate } from '@/lib/effects/use-block-dissolve-navigate';
@@ -24,14 +23,6 @@ export default function Hero() {
 
         <div className="hero-enter hero-enter-delay-2 flex flex-col gap-4 md:flex-row md:gap-12">
           <a
-            href="https://github.com/srbhr/Resume-Matcher"
-            target="_blank"
-            rel="noopener noreferrer"
-            className={buttonClass({ variant: 'outline', size: 'lg' })}
-          >
-            GitHub
-          </a>
-          <a
             href="https://resumematcher.fyi/docs/"
             target="_blank"
             rel="noopener noreferrer"
@@ -49,11 +40,6 @@ export default function Hero() {
             {t('home.launchApp')}
           </Link>
         </div>
-
-        <CommunityLinks
-          variant="hero"
-          className="hero-enter hero-enter-delay-2 mt-8 justify-center"
-        />
       </div>
     </section>
   );

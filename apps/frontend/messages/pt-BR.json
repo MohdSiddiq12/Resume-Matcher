@@ -41,16 +41,7 @@
     "launchApp": "Abrir App"
   },
   "community": {
-    "follow": "Seguir @srbhr",
-    "star": "Dar estrela",
-    "starOnGithub": "Dar estrela no GitHub",
-    "sponsor": "Patrocinar",
-    "discord": "Discord",
-    "joinDiscord": "Entrar no Discord",
-    "contributors": "Colaboradores",
     "settingsPrompt": "Gostando do Resume Matcher?",
-    "sponsorProject": "Patrocine o projeto",
-    "joinTheDiscord": "Entre no Discord",
     "aboutTitle": "Sobre"
   },
   "nav": {

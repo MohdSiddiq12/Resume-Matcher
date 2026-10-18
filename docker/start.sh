@@ -216,16 +216,23 @@ trap cleanup SIGTERM SIGINT SIGQUIT
 # Wait for backend to be ready
 info "Waiting for backend to be ready..."
 for i in {1..30}; do
-    if curl -s "http://127.0.0.1:${BACKEND_PORT}/api/v1/health" > /dev/null 2>&1; then
+    if curl --fail --silent "http://127.0.0.1:${BACKEND_PORT}/api/v1/health" > /dev/null 2>&1; then
         status "Backend is ready (PID: $BACKEND_PID)"
         break
     fi
-    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-        error "Backend process (PID: $BACKEND_PID) died during startup"
-        exit 1
+    # kill -0 also succeeds for an exited child that Bash has not reaped yet.
+    # Check the job table so immediate startup failures surface their exit code
+    # instead of waiting through the full readiness timeout.
+    if ! jobs -pr | grep -Fxq "$BACKEND_PID"; then
+        set +e
+        wait "$BACKEND_PID"
+        BACKEND_EXIT_CODE=$?
+        set -e
+        error "Backend process exited during startup (exit code: ${BACKEND_EXIT_CODE}); see its log output above."
+        exit "$BACKEND_EXIT_CODE"
     fi
     if [ $i -eq 30 ]; then
-        error "Backend failed to start within 30 seconds"
+        error "Backend health check did not pass within 30 seconds; see backend logs above."
         exit 1
     fi
     sleep 1

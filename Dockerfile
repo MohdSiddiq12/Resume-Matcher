@@ -168,8 +168,9 @@ RUN useradd -m -u 1000 appuser \
 
 USER appuser
 
-# Expose the public port (backend remains internal on 8000)
-EXPOSE 3000
+# The local Compose default is 3000; Render supplies PORT=10000 by default.
+# FastAPI remains on loopback port 8000 and is not exposed publicly.
+EXPOSE 3000 10000
 
 # Volume for persistent data
 VOLUME ["/app/backend/data"]

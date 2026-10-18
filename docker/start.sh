@@ -208,16 +208,33 @@ fi
 echo ""
 info "Starting backend server on internal port ${BACKEND_PORT}..."
 cd /app/backend
-trap '' SIGTERM SIGINT SIGQUIT
-python -m uvicorn app.main:app --host 127.0.0.1 --port "${BACKEND_PORT}" --log-level "${UVICORN_LOG_LEVEL}" &
+python -u -m uvicorn app.main:app --host 127.0.0.1 --port "${BACKEND_PORT}" --log-level "${UVICORN_LOG_LEVEL}" &
 BACKEND_PID=$!
-trap cleanup SIGTERM SIGINT SIGQUIT
 
-# Wait for backend to be ready
-info "Waiting for backend to be ready..."
+# Start the public listener immediately. Render scans the service port during
+# startup, so a slow backend must not prevent Next.js from binding PORT.
+echo ""
+info "Starting frontend server on port ${FRONTEND_PORT}..."
+cd /app/frontend
+export HOSTNAME="0.0.0.0"
+export PORT="${FRONTEND_PORT}"
+if [ ! -f "server.js" ]; then
+    error "Missing frontend standalone server.js. Rebuild the Docker image."
+    exit 1
+fi
+node server.js "$@" &
+FRONTEND_PID=$!
+status "Frontend process launched (PID: $FRONTEND_PID)"
+
+# Report backend readiness, but keep the public listener up while the backend
+# is starting. Configure Render's HTTP health check as /api/v1/health so the
+# deployment is not considered healthy until the proxied API is ready.
+info "Checking backend health on its internal port..."
+BACKEND_READY=0
 for i in {1..30}; do
     if curl --fail --silent "http://127.0.0.1:${BACKEND_PORT}/api/v1/health" > /dev/null 2>&1; then
         status "Backend is ready (PID: $BACKEND_PID)"
+        BACKEND_READY=1
         break
     fi
     # kill -0 also succeeds for an exited child that Bash has not reaped yet.
@@ -228,38 +245,36 @@ for i in {1..30}; do
         wait "$BACKEND_PID"
         BACKEND_EXIT_CODE=$?
         set -e
-        error "Backend process exited during startup (exit code: ${BACKEND_EXIT_CODE}); see its log output above."
-        exit "$BACKEND_EXIT_CODE"
+        BACKEND_PID=""
+        error "Backend process exited during startup (exit code: ${BACKEND_EXIT_CODE}); frontend remains up for diagnostics."
+        break
+    fi
+    if ! jobs -pr | grep -Fxq "$FRONTEND_PID"; then
+        set +e
+        wait "$FRONTEND_PID"
+        FRONTEND_EXIT_CODE=$?
+        set -e
+        error "Frontend process exited during startup (exit code: ${FRONTEND_EXIT_CODE}); see its log output above."
+        exit "$FRONTEND_EXIT_CODE"
     fi
     if [ $i -eq 30 ]; then
-        error "Backend health check did not pass within 30 seconds; see backend logs above."
-        exit 1
+        warn "Backend health check did not pass within 30 seconds; frontend remains available and backend logs should show the cause."
+        break
     fi
     sleep 1
 done
 
-# Start frontend
-echo ""
-info "Starting frontend server on port ${FRONTEND_PORT}..."
-cd /app/frontend
-
-# Next.js uses PORT environment variable
-export HOSTNAME="0.0.0.0"
-export PORT="${FRONTEND_PORT}"
-if [ ! -f "server.js" ]; then
-    error "Missing frontend standalone server.js. Rebuild the Docker image."
-    exit 1
+if [ "$BACKEND_READY" -eq 1 ]; then
+    status "Application startup checks passed."
 fi
-
-trap '' SIGTERM SIGINT SIGQUIT
-node server.js "$@" &
-FRONTEND_PID=$!
-trap cleanup SIGTERM SIGINT SIGQUIT
-status "Frontend is running (PID: $FRONTEND_PID)"
 
 # Wait for either process to exit, but ignore errexit for this wait
 set +e
-wait -n "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null
+if [ -n "$BACKEND_PID" ]; then
+    wait -n "$BACKEND_PID" "$FRONTEND_PID" 2>/dev/null
+else
+    wait "$FRONTEND_PID" 2>/dev/null
+fi
 EXIT_CODE=$?
 set -e
 warn "A process exited unexpectedly (exit code: ${EXIT_CODE}), shutting down..."

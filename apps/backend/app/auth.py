@@ -66,6 +66,41 @@ def validate_auth_configuration() -> None:
     ):
         raise RuntimeError("APP_AUTH_ORIGIN must be the HTTPS application origin.")
 
+    if os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"):
+        # Render Free has ephemeral local storage. Refuse to silently start with
+        # SQLite or a generated filesystem key, which would lose durable state
+        # or make database-encrypted credentials unreadable after a restart.
+        from app.config import settings
+
+        missing = []
+        if not settings.database_url:
+            missing.append("DATABASE_URL")
+        if not settings.encryption_key:
+            missing.append("ENCRYPTION_KEY")
+        if missing:
+            raise RuntimeError(
+                "Render deployment requires persistent configuration: "
+                + ", ".join(missing)
+                + "."
+            )
+
+        frontend_origin = urlsplit(settings.frontend_base_url.strip().rstrip("/"))
+        if (
+            frontend_origin.scheme != origin.scheme
+            or frontend_origin.hostname != origin.hostname
+            or frontend_origin.port != origin.port
+        ):
+            raise RuntimeError(
+                "FRONTEND_BASE_URL must match APP_AUTH_ORIGIN on Render."
+            )
+
+        from cryptography.fernet import Fernet
+
+        try:
+            Fernet(settings.encryption_key.encode("ascii"))
+        except (UnicodeEncodeError, ValueError, TypeError):
+            raise RuntimeError("ENCRYPTION_KEY must be a valid Fernet key.") from None
+
 
 def _encoded(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")

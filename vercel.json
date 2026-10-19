@@ -1,0 +1,52 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "frontend": {
+      "root": "apps/frontend",
+      "framework": "nextjs"
+    },
+    "backend": {
+      "root": "apps/backend",
+      "framework": "fastapi",
+      "entrypoint": "app.main:app"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/auth/callback",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/docs",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/redoc",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/openapi.json",
+      "destination": {
+        "service": "backend"
+      }
+    },
+    {
+      "source": "/(.*)",
+      "destination": {
+        "service": "frontend"
+      }
+    }
+  ]
+}

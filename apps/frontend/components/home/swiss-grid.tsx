@@ -3,7 +3,7 @@
 import React from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
-import { ListNumbers, SquaresFour } from '@phosphor-icons/react';
+import { Briefcase, ListNumbers, SquaresFour } from '@phosphor-icons/react';
 import { buttonClass } from '@/components/ui/button';
 import { PageFrame } from '@/components/ui/page-frame';
 import { PageHeader } from '@/components/ui/page-header';
@@ -50,6 +50,13 @@ export const SwissGrid = ({
         </div>
         <div className="flex flex-wrap items-center gap-4">
           <Link
+            href="/discover/jobs"
+            className={buttonClass({ variant: 'outline', className: 'min-w-36' })}
+          >
+            <Briefcase aria-hidden="true" />
+            {t('nav.discoverJobs')}
+          </Link>
+          <Link
             href="/queue"
             className={buttonClass({ variant: 'outline', className: 'min-w-36' })}
           >
@@ -62,6 +69,12 @@ export const SwissGrid = ({
           >
             <SquaresFour aria-hidden="true" />
             {t('nav.applicationTracker')}
+          </Link>
+          <Link
+            href="/applications/follow-ups"
+            className={buttonClass({ variant: 'outline', className: 'min-w-36' })}
+          >
+            Follow-ups
           </Link>
           <Link
             href="/settings"

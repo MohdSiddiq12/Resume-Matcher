@@ -237,6 +237,19 @@ export async function uploadJobDescriptions(
   return data.job_id[0];
 }
 
+export interface StoredJobDescription {
+  job_id: string;
+  content: string;
+  [metadata: string]: unknown;
+}
+
+/** Fetch a prepared job description by its opaque, persisted job ID. */
+export async function fetchStoredJobDescription(jobId: string): Promise<StoredJobDescription> {
+  const res = await apiFetch(`/jobs/${encodeURIComponent(jobId)}`);
+  if (!res.ok) throw new Error(`Failed to fetch prepared job (${res.status})`);
+  return (await res.json()) as StoredJobDescription;
+}
+
 /** Improves the resume and returns the full preview object */
 export async function improveResume(
   resumeId: string,

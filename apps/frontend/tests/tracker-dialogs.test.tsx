@@ -1,10 +1,12 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { CardDetailModal } from '@/components/tracker/card-detail-modal';
 import { ManualAddApplicationDialog } from '@/components/tracker/manual-add-application-dialog';
 import {
   createApplication,
   getApplicationDetail,
+  listApplicationEvents,
+  saveApplicationOutreachDraft,
   updateApplication,
   type ApplicationDetail,
 } from '@/lib/api/tracker';
@@ -18,6 +20,17 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock('@/lib/api/tracker', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/api/tracker')>()),
   getApplicationDetail: vi.fn(),
+  getApplicationOutreachDraft: vi.fn(async () => ({
+    application_id: 'a1',
+    content: '',
+    updated_at: null,
+  })),
+  listApplicationEvents: vi.fn(async () => []),
+  saveApplicationOutreachDraft: vi.fn(async (application_id: string, content: string) => ({
+    application_id,
+    content,
+    updated_at: '2026-10-20T00:00:00Z',
+  })),
   createApplication: vi.fn(),
   updateApplication: vi.fn(),
 }));
@@ -59,7 +72,7 @@ describe('ManualAddApplicationDialog', () => {
       await screen.findByRole('button', { name: 'tracker.manualAdd.resume Main CV' })
     ).toHaveAttribute('aria-haspopup', 'listbox');
     expect(
-      screen.getByRole('button', { name: 'tracker.manualAdd.status tracker.columns.applied' })
+      screen.getByRole('button', { name: 'tracker.manualAdd.status tracker.columns.saved' })
     ).toHaveAttribute('aria-haspopup', 'listbox');
   });
 });
@@ -134,5 +147,35 @@ describe('CardDetailModal', () => {
     );
     expect(screen.getByText(expected)).toBeInTheDocument();
     expect(screen.getByRole('alert')).toHaveTextContent('tracker.modal.resumeUnavailable');
+  });
+
+  it('shows the generated outreach draft and confirmed status event reference', async () => {
+    vi.mocked(getApplicationDetail).mockResolvedValue({
+      ...detail,
+      resume: { outreach_message: 'Hello, I am interested in this role.' },
+    });
+    vi.mocked(listApplicationEvents).mockResolvedValue([
+      {
+        event_id: 'event-confirmed-1',
+        application_id: 'a1',
+        from_status: 'saved',
+        to_status: 'applied',
+        confirmed: true,
+        note: 'Submitted on company site',
+        created_at: '2026-10-19T10:00:00Z',
+      },
+    ]);
+    render(<CardDetailModal applicationId="a1" open onOpenChange={vi.fn()} onUpdated={vi.fn()} />);
+
+    const draft = await screen.findByRole('textbox', { name: 'tracker.modal.outreachDraft' });
+    expect(draft).toHaveValue('Hello, I am interested in this role.');
+    expect(screen.getByText('event-confirmed-1')).toBeInTheDocument();
+    expect(screen.getByText('tracker.modal.confirmedStatus')).toBeInTheDocument();
+
+    fireEvent.change(draft, { target: { value: 'Updated local draft.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'tracker.modal.saveOutreachDraft' }));
+    await waitFor(() =>
+      expect(saveApplicationOutreachDraft).toHaveBeenCalledWith('a1', 'Updated local draft.')
+    );
   });
 });

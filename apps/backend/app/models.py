@@ -95,10 +95,110 @@ class Job(Base):
     __tablename__ = "jobs"
 
     job_id: Mapped[str] = mapped_column(String, primary_key=True)
-    content: Mapped[str] = mapped_column(Text)
+    content: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     resume_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class JobHuntJobLink(Base):
+    """Idempotent link from a JobHunt listing and description version to a Matcher job."""
+
+    __tablename__ = "jobhunt_job_links"
+    __table_args__ = (UniqueConstraint("job_key", "content_sha256"),)
+
+    link_id: Mapped[str] = mapped_column(String, primary_key=True)
+    job_key: Mapped[str] = mapped_column(String, index=True)
+    content_sha256: Mapped[str] = mapped_column(String(64))
+    job_id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+
+
+class JobHuntDiscoveryState(Base):
+    """Persist the user's saved/skipped state without changing JobHunt source data."""
+
+    __tablename__ = "jobhunt_discovery_states"
+
+    job_key: Mapped[str] = mapped_column(String, primary_key=True)
+    pipeline_state: Mapped[str] = mapped_column(String, default="new")
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+
+
+class JobHuntLiveJob(Base):
+    """A locally persisted result from an authorized live job source."""
+
+    __tablename__ = "jobhunt_live_jobs"
+    __table_args__ = (UniqueConstraint("provider", "canonical_id"),)
+
+    job_key: Mapped[str] = mapped_column(String, primary_key=True)
+    provider: Mapped[str] = mapped_column(String, default="freehire")
+    canonical_id: Mapped[str] = mapped_column(String)
+    source_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    title: Mapped[str] = mapped_column(String)
+    company: Mapped[str | None] = mapped_column(String, nullable=True)
+    location: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_url: Mapped[str] = mapped_column(String)
+    posted_date: Mapped[str | None] = mapped_column(String, nullable=True)
+    description_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_status: Mapped[str] = mapped_column(String, default="missing")
+    description_method: Mapped[str] = mapped_column(
+        String, default="freehire_agent_search"
+    )
+    description_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retrieved_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    last_checked_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    salary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+
+
+class JobHuntSearchProfile(Base):
+    """User-controlled local profile and filters for profile-based discovery."""
+
+    __tablename__ = "jobhunt_search_profiles"
+
+    profile_id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    profile_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+
+
+class JobHuntSearchRun(Base):
+    """Audit and refresh history for manual external-source searches."""
+
+    __tablename__ = "jobhunt_search_runs"
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    provider: Mapped[str] = mapped_column(String, default="freehire")
+    queries_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    filters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String, default="running")
+    started_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    found_count: Mapped[int] = mapped_column(Integer, default=0)
+    new_count: Mapped[int] = mapped_column(Integer, default=0)
+    errors_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+
+
+class JobHuntSavedSearch(Base):
+    """A local, user-controlled search configuration and optional schedule."""
+
+    __tablename__ = "jobhunt_saved_searches"
+
+    search_id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String)
+    query: Mapped[str | None] = mapped_column(String, nullable=True)
+    filters_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    interval_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+    next_run_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_run_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_run_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
 
 
 class Improvement(Base):
@@ -160,12 +260,26 @@ class Application(Base):
         # Concurrency-safe dedupe: a card is unique per (job, applied resume).
         # The app-level select-then-insert relies on this to collapse races.
         UniqueConstraint("job_id", "resume_id", name="uq_application_job_resume"),
+        Index(
+            "uq_application_job_untailored",
+            "job_id",
+            unique=True,
+            sqlite_where=text("resume_id IS NULL"),
+            postgresql_where=text("resume_id IS NULL"),
+        ),
+        Index(
+            "uq_applications_legacy_id",
+            "legacy_application_id",
+            unique=True,
+            sqlite_where=text("legacy_application_id IS NOT NULL"),
+            postgresql_where=text("legacy_application_id IS NOT NULL"),
+        ),
     )
 
     application_id: Mapped[str] = mapped_column(String, primary_key=True)
     job_id: Mapped[str] = mapped_column(String, index=True)
-    # The applied/tailored resume shown in the modal and opened by "Edit".
-    resume_id: Mapped[str] = mapped_column(String, index=True)
+    # The applied/tailored resume shown in the modal and opened by "Edit" (nullable for untailored leads).
+    resume_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
     # Optional base resume the tailored one descends from (powers "stack" grouping).
     master_resume_id: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, default="applied", index=True)
@@ -175,6 +289,33 @@ class Application(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+    legacy_application_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    legacy_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    follow_up_date: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class ApplicationEvent(Base):
+    """An event recording state transitions or actions on an application card."""
+
+    __tablename__ = "application_events"
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    application_id: Mapped[str] = mapped_column(String, index=True)
+    from_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    to_status: Mapped[str] = mapped_column(String, index=True)
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
+
+
+class ApplicationOutreachDraft(Base):
+    """A locally saved outreach draft associated with a tracker card."""
+
+    __tablename__ = "application_outreach_drafts"
+
+    application_id: Mapped[str] = mapped_column(String, primary_key=True)
+    content: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[str] = mapped_column(String, default=_utcnow_iso)
 
 

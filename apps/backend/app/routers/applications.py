@@ -1,16 +1,20 @@
 """Kanban application-tracker endpoints."""
 
 import logging
+from datetime import date, timedelta
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.database import DatabaseBusyError, db
 from app.schemas import (
     APPLICATION_STATUS_ORDER,
     ApplicationActionResponse,
     ApplicationDetailResponse,
+    ApplicationEventListResponse,
     ApplicationListResponse,
+    ApplicationOutreachDraftRequest,
+    ApplicationOutreachDraftResponse,
     ApplicationResponse,
     ApplicationUpdate,
     BulkDelete,
@@ -22,6 +26,10 @@ from app.services.improver import extract_job_keywords
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/applications", tags=["Application Tracker"])
+
+CONFIRM_REQUIRED_STATUSES = frozenset(
+    {"applied", "no_response", "response", "interview", "accepted", "rejected"}
+)
 
 
 def _group_by_status(
@@ -60,6 +68,37 @@ async def list_applications() -> ApplicationListResponse:
     return ApplicationListResponse(columns=_group_by_status(applications))
 
 
+@router.get("/follow-ups")
+async def list_follow_ups(
+    through: date = Query(default_factory=lambda: date.today() + timedelta(days=14)),
+) -> dict[str, Any]:
+    """List scheduled follow-ups, including overdue items, without changing status."""
+    try:
+        applications = await db.list_applications()
+    except DatabaseBusyError:
+        raise
+    except Exception as e:
+        logger.error("Failed to list follow-ups: %s", e)
+        raise HTTPException(
+            status_code=500, detail="Failed to load follow-ups. Please try again."
+        ) from e
+
+    today = date.today()
+    due = []
+    for application in applications:
+        value = application.get("follow_up_date")
+        if not value:
+            continue
+        try:
+            follow_up = date.fromisoformat(value)
+        except (TypeError, ValueError):
+            continue
+        if follow_up <= through:
+            due.append({**application, "follow_up_overdue": follow_up < today})
+    due.sort(key=lambda row: (row["follow_up_date"], row.get("company") or ""))
+    return {"items": due, "through": through.isoformat()}
+
+
 @router.post("", response_model=ApplicationResponse)
 async def create_application(request: ManualApplicationCreate) -> ApplicationResponse:
     """Manually add a card from a pasted job description.
@@ -67,6 +106,15 @@ async def create_application(request: ManualApplicationCreate) -> ApplicationRes
     Runs best-effort company/role extraction before opening a transaction, then
     commits the pasted job, its metadata and the card as one operation.
     """
+    if (
+        request.status.value in CONFIRM_REQUIRED_STATUSES
+        and request.confirmed is not True
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm that this application was submitted before using this status.",
+        )
+
     company = request.company
     role = request.role
     if not company or not role:
@@ -82,6 +130,7 @@ async def create_application(request: ManualApplicationCreate) -> ApplicationRes
             company=company,
             role=role,
             notes=request.notes,
+            confirmed=request.confirmed is True,
         )
     except DatabaseBusyError:
         raise
@@ -123,14 +172,64 @@ async def get_application_detail(application_id: str) -> ApplicationDetailRespon
     )
 
 
+@router.get("/{application_id}/events", response_model=ApplicationEventListResponse)
+async def get_application_events(
+    application_id: str,
+) -> ApplicationEventListResponse:
+    if await db.get_application(application_id) is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return ApplicationEventListResponse(
+        items=await db.list_application_events(application_id)
+    )
+
+
+@router.get(
+    "/{application_id}/outreach-draft",
+    response_model=ApplicationOutreachDraftResponse,
+)
+async def get_application_outreach_draft(
+    application_id: str,
+) -> ApplicationOutreachDraftResponse:
+    if await db.get_application(application_id) is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    draft = await db.get_application_outreach_draft(application_id)
+    if draft is None:
+        return ApplicationOutreachDraftResponse(
+            application_id=application_id, content=""
+        )
+    return ApplicationOutreachDraftResponse(**draft)
+
+
+@router.put(
+    "/{application_id}/outreach-draft",
+    response_model=ApplicationOutreachDraftResponse,
+)
+async def save_application_outreach_draft(
+    application_id: str,
+    request: ApplicationOutreachDraftRequest,
+) -> ApplicationOutreachDraftResponse:
+    draft = await db.save_application_outreach_draft(application_id, request.content)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Application not found")
+    return ApplicationOutreachDraftResponse(**draft)
+
+
 @router.patch("/bulk", response_model=ApplicationActionResponse)
 async def bulk_update_applications(
     request: BulkStatusUpdate,
 ) -> ApplicationActionResponse:
     """Move many cards to one column."""
+    if (
+        request.status.value in CONFIRM_REQUIRED_STATUSES
+        and request.confirmed is not True
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Confirm the real-world application status before moving these cards.",
+        )
     try:
         moved = await db.bulk_update_applications(
-            request.application_ids, request.status.value
+            request.application_ids, request.status.value, confirmed=True
         )
     except DatabaseBusyError:
         raise
@@ -153,6 +252,14 @@ async def update_application(
     # Normalize the enum to its stable string value for the data layer.
     if "status" in updates and updates["status"] is not None:
         updates["status"] = request.status.value
+        if (
+            updates["status"] in CONFIRM_REQUIRED_STATUSES
+            and request.confirmed is not True
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Confirm the real-world application status before moving this card.",
+            )
     try:
         updated = await db.update_application(application_id, updates)
     except DatabaseBusyError:

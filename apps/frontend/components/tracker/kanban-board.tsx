@@ -16,6 +16,7 @@ import { useReducedMotion } from 'motion/react';
 import { ArrowLeft, Plus, Gear, SpinnerGap, CaretLeft, CaretRight } from '@phosphor-icons/react';
 import { Button, buttonClass } from '@/components/ui/button';
 import { Alert } from '@/components/ui/alert';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { EmptyState } from '@/components/ui/empty-state';
 import { useTranslations } from '@/lib/i18n';
 import {
@@ -24,6 +25,7 @@ import {
   bulkUpdateStatus,
   bulkDeleteApplications,
   APPLICATION_STATUS_ORDER,
+  CONFIRM_REQUIRED_STATUSES,
   type Application,
   type ApplicationColumns,
   type ApplicationStatus,
@@ -62,6 +64,13 @@ export function KanbanBoard() {
   const [openCardId, setOpenCardId] = useState<string | null>(null);
   const [manualAddOpen, setManualAddOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  const [pendingMove, setPendingMove] = useState<{
+    kind: 'single' | 'bulk';
+    status: ApplicationStatus;
+    applicationId?: string;
+    position?: number;
+    ids?: string[];
+  } | null>(null);
   const [hiddenStatuses, setHiddenStatuses] = useState<Set<ApplicationStatus>>(() =>
     readHiddenStatuses()
   );
@@ -163,19 +172,37 @@ export function KanbanBoard() {
     const plan = planMove(columns, String(active.id), String(over.id));
     if (!plan) return;
 
+    if (!CONFIRM_REQUIRED_STATUSES.includes(plan.status)) {
+      persistMove(String(active.id), plan.status, plan.position);
+      return;
+    }
+    setPendingMove({
+      kind: 'single',
+      status: plan.status,
+      applicationId: String(active.id),
+      position: plan.position,
+    });
+  };
+
+  const persistMove = (
+    applicationId: string,
+    status: ApplicationStatus,
+    position: number,
+    confirmed = false
+  ) => {
+    const plan = planMove(columns, applicationId, status);
+    if (!plan) return;
     // Optimistic update. If the server rejects the move we re-load authoritative
     // state from the server rather than reverting to a captured snapshot, which
     // could be stale if another move/refresh landed in the meantime.
     setColumns(plan.next);
-    updateApplication(String(active.id), { status: plan.status, position: plan.position }).catch(
-      async () => {
-        // Re-sync authoritative state, THEN show a generic failure message:
-        // load() clears the error on success, so set it afterwards to keep it
-        // visible. Never echo raw backend error text (it could leak secrets).
-        await load();
-        setError(t('tracker.errors.moveFailed'));
-      }
-    );
+    updateApplication(applicationId, { status, position, confirmed }).catch(async () => {
+      // Re-sync authoritative state, THEN show a generic failure message:
+      // load() clears the error on success, so set it afterwards to keep it
+      // visible. Never echo raw backend error text (it could leak secrets).
+      await load();
+      setError(t('tracker.errors.moveFailed'));
+    });
   };
 
   const toggleSelect = (id: string) => {
@@ -189,11 +216,15 @@ export function KanbanBoard() {
 
   const clearSelection = () => setSelectedIds(new Set());
 
-  const handleBulkMove = async (status: ApplicationStatus) => {
+  const handleBulkMove = async (status: ApplicationStatus, confirmed = false) => {
     const ids = [...selectedIds];
     if (ids.length === 0) return;
+    if (!confirmed && CONFIRM_REQUIRED_STATUSES.includes(status)) {
+      setPendingMove({ kind: 'bulk', status, ids });
+      return;
+    }
     try {
-      await bulkUpdateStatus(ids, status);
+      await bulkUpdateStatus(ids, status, confirmed);
       clearSelection();
       await load();
     } catch {
@@ -366,6 +397,32 @@ export function KanbanBoard() {
           if (!open) setOpenCardId(null);
         }}
         onUpdated={load}
+      />
+      <ConfirmDialog
+        open={pendingMove !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingMove(null);
+        }}
+        title={t('tracker.statusConfirm.title')}
+        description={t('tracker.statusConfirm.description', {
+          status: pendingMove ? t(`tracker.columns.${pendingMove.status}`) : '',
+          count: String(pendingMove?.ids?.length ?? 1),
+        })}
+        confirmLabel={t('tracker.statusConfirm.confirm')}
+        variant="warning"
+        onConfirm={() => {
+          const move = pendingMove;
+          setPendingMove(null);
+          if (!move) return;
+          if (move.kind === 'bulk') {
+            void handleBulkMove(move.status, true);
+            return;
+          }
+          if (!move.applicationId) return;
+          if (move.position !== undefined) {
+            persistMove(move.applicationId, move.status, move.position, true);
+          }
+        }}
       />
 
       <ManualAddApplicationDialog

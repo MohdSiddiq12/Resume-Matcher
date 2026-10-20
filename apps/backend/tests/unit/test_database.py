@@ -342,7 +342,8 @@ class TestApplications:
         b = await db.create_application(job_id="j2", resume_id="r2")
         # Move a to the front of "interview".
         moved = await db.update_application(
-            a["application_id"], {"status": "interview", "position": 0}
+            a["application_id"],
+            {"status": "interview", "position": 0, "confirmed": True},
         )
         assert moved["status"] == "interview"
         assert moved["position"] == 0

@@ -40,6 +40,14 @@ describe('SwissGrid', () => {
     expect(link.parentElement).toHaveClass('flex-wrap');
   });
 
+  it('links the read-only JobHunt discovery page from the footer', () => {
+    render(<SwissGrid>{null}</SwissGrid>);
+
+    const link = screen.getByRole('link', { name: 'nav.discoverJobs' });
+    expect(link).toHaveAttribute('href', '/discover/jobs');
+    expect(link.querySelector('button')).toBeNull();
+  });
+
   it('ends after the footer row without external community links', () => {
     render(<SwissGrid>{null}</SwissGrid>);
 

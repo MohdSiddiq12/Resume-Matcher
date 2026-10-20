@@ -40,8 +40,99 @@ class TestListAndGroup:
         assert columns["applied"][0]["resume_id"] == "r1"
 
 
+class TestFollowUps:
+    async def test_follow_ups_include_overdue_and_due_items_only(self, isolated_db):
+        overdue = await _seed_card(
+            isolated_db,
+            job_id="j-overdue",
+            resume_id="r-overdue",
+            status="saved",
+            follow_up_date="2026-10-01",
+        )
+        due = await _seed_card(
+            isolated_db,
+            job_id="j-due",
+            resume_id="r-due",
+            status="saved",
+            follow_up_date="2026-10-25",
+        )
+        await _seed_card(
+            isolated_db,
+            job_id="j-future",
+            resume_id="r-future",
+            status="saved",
+            follow_up_date="2026-11-30",
+        )
+        async with _client() as client:
+            response = await client.get(
+                "/api/v1/applications/follow-ups?through=2026-10-25"
+            )
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert [item["application_id"] for item in items] == [
+            overdue["application_id"],
+            due["application_id"],
+        ]
+        assert [item["follow_up_overdue"] for item in items] == [True, False]
+
+
+class TestApplicationHistoryAndDraft:
+    async def test_status_confirmation_history_and_outreach_draft_are_local(
+        self, isolated_db
+    ):
+        card = await _seed_card(
+            isolated_db,
+            job_id="j-history",
+            resume_id="r-history",
+            status="saved",
+            company="Acme",
+            role="AI Engineer",
+        )
+        application_id = card["application_id"]
+        async with _client() as client:
+            moved = await client.patch(
+                f"/api/v1/applications/{application_id}",
+                json={
+                    "status": "applied",
+                    "confirmed": True,
+                    "note": "Submitted on the company careers site.",
+                },
+            )
+            history = await client.get(f"/api/v1/applications/{application_id}/events")
+            saved = await client.put(
+                f"/api/v1/applications/{application_id}/outreach-draft",
+                json={"content": "Hello, I am interested in the AI Engineer role."},
+            )
+            loaded = await client.get(
+                f"/api/v1/applications/{application_id}/outreach-draft"
+            )
+
+        assert moved.status_code == 200
+        assert history.status_code == 200
+        event = history.json()["items"][-1]
+        assert event["from_status"] == "saved"
+        assert event["to_status"] == "applied"
+        assert event["confirmed"] is True
+        assert event["note"] == "Submitted on the company careers site."
+        assert saved.status_code == 200
+        assert loaded.json()["content"] == saved.json()["content"]
+
+
 class TestManualAdd:
-    async def test_manual_add_extracts_company_role(self, isolated_db):
+    async def test_manual_add_applied_status_requires_confirmation(self, isolated_db):
+        async with _client() as client:
+            response = await client.post(
+                "/api/v1/applications",
+                json={
+                    "resume_id": "res-1",
+                    "job_description": "We are Acme Corp hiring a Staff Engineer...",
+                    "status": "applied",
+                },
+            )
+        assert response.status_code == 409
+        assert (await isolated_db.get_stats())["total_jobs"] == 0
+
+    async def test_manual_add_starts_saved_and_extracts_company_role(self, isolated_db):
         with patch(
             "app.routers.applications.extract_job_keywords",
             new_callable=AsyncMock,
@@ -53,13 +144,15 @@ class TestManualAdd:
                     json={
                         "resume_id": "res-1",
                         "job_description": "We are Acme Corp hiring a Staff Engineer...",
+                        "status": "saved",
                     },
                 )
         assert resp.status_code == 200
         body = resp.json()
         assert body["company"] == "Acme Corp"
         assert body["role"] == "Staff Engineer"
-        assert body["status"] == "applied"
+        assert body["status"] == "saved"
+        assert body["applied_at"] is None
 
     async def test_manual_add_respects_explicit_fields_without_llm(self, isolated_db):
         with patch(
@@ -117,13 +210,25 @@ class TestDetail:
 
 
 class TestUpdateAndMove:
-    async def test_patch_moves_card_across_columns(self, isolated_db):
+    async def test_patch_requires_confirmation_for_applied_status(self, isolated_db):
+        card = await _seed_card(isolated_db, status="saved")
+        async with _client() as client:
+            resp = await client.patch(
+                f"/api/v1/applications/{card['application_id']}",
+                json={"status": "interview"},
+            )
+        assert resp.status_code == 409
+        assert (await isolated_db.get_application(card["application_id"]))[
+            "status"
+        ] == "saved"
+
+    async def test_patch_moves_card_across_columns_when_confirmed(self, isolated_db):
         a = await _seed_card(isolated_db, job_id="j1", resume_id="r1", status="applied")
         b = await _seed_card(isolated_db, job_id="j2", resume_id="r2", status="applied")
         async with _client() as client:
             resp = await client.patch(
                 f"/api/v1/applications/{a['application_id']}",
-                json={"status": "interview", "position": 0},
+                json={"status": "interview", "position": 0, "confirmed": True},
             )
         assert resp.status_code == 200
         assert resp.json()["status"] == "interview"
@@ -138,12 +243,17 @@ class TestUpdateAndMove:
         async with _client() as client:
             resp = await client.patch(
                 f"/api/v1/applications/{card['application_id']}",
-                json={"notes": "Recruiter call Friday", "company": "NewCo"},
+                json={
+                    "notes": "Recruiter call Friday",
+                    "company": "NewCo",
+                    "follow_up_date": "2026-10-25",
+                },
             )
         assert resp.status_code == 200
         body = resp.json()
         assert body["notes"] == "Recruiter call Friday"
         assert body["company"] == "NewCo"
+        assert body["follow_up_date"] == "2026-10-25"
 
     async def test_patch_unknown_returns_404(self, isolated_db):
         async with _client() as client:
@@ -152,6 +262,23 @@ class TestUpdateAndMove:
 
 
 class TestBulkAndDelete:
+    async def test_bulk_move_requires_confirmation_for_applied_status(
+        self, isolated_db
+    ):
+        card = await _seed_card(isolated_db)
+        async with _client() as client:
+            resp = await client.patch(
+                "/api/v1/applications/bulk",
+                json={
+                    "application_ids": [card["application_id"]],
+                    "status": "interview",
+                },
+            )
+        assert resp.status_code == 409
+        assert (await isolated_db.get_application(card["application_id"]))[
+            "status"
+        ] == "applied"
+
     async def test_bulk_move(self, isolated_db):
         a = await _seed_card(isolated_db, job_id="j1", resume_id="r1")
         b = await _seed_card(isolated_db, job_id="j2", resume_id="r2")
@@ -161,6 +288,7 @@ class TestBulkAndDelete:
                 json={
                     "application_ids": [a["application_id"], b["application_id"]],
                     "status": "rejected",
+                    "confirmed": True,
                 },
             )
         assert resp.status_code == 200

@@ -37,8 +37,16 @@ from app.db_url import validate_schema_name
 from app.models import (
     ApiKey,
     Application,
+    ApplicationEvent,
+    ApplicationOutreachDraft,
     Improvement,
     Job,
+    JobHuntDiscoveryState,
+    JobHuntJobLink,
+    JobHuntLiveJob,
+    JobHuntSavedSearch,
+    JobHuntSearchProfile,
+    JobHuntSearchRun,
     QueueItem,
     Resume,
     TailoringPreview,
@@ -307,8 +315,23 @@ class Database:
             "applied_at": row.applied_at,
             "notes": row.notes,
             "position": row.position,
+            "legacy_application_id": row.legacy_application_id,
+            "legacy_status": row.legacy_status,
+            "follow_up_date": row.follow_up_date,
             "created_at": row.created_at,
             "updated_at": row.updated_at,
+        }
+
+    @staticmethod
+    def _application_event_to_dict(row: ApplicationEvent) -> dict[str, Any]:
+        return {
+            "event_id": row.event_id,
+            "application_id": row.application_id,
+            "from_status": row.from_status,
+            "to_status": row.to_status,
+            "confirmed": row.confirmed,
+            "note": row.note,
+            "created_at": row.created_at,
         }
 
     @staticmethod
@@ -731,6 +754,606 @@ class Database:
             await session.commit()
         return [self._job_to_dict(row) for row in rows]
 
+    async def create_or_get_jobhunt_job(
+        self,
+        *,
+        job_key: str,
+        content: str,
+        content_sha256: str,
+        metadata: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Create one durable Matcher job per JobHunt key and description version."""
+        async with self._write_session() as session:
+            link = await session.scalar(
+                select(JobHuntJobLink).where(
+                    JobHuntJobLink.job_key == job_key,
+                    JobHuntJobLink.content_sha256 == content_sha256,
+                )
+            )
+            if link is not None:
+                job = await session.get(Job, link.job_id)
+                if job is None:
+                    raise RuntimeError("JobHunt link references a missing Matcher job")
+                return self._job_to_dict(job), False
+
+            job_id = str(uuid4())
+            job = Job(
+                job_id=job_id,
+                content=content,
+                resume_id=None,
+                created_at=_now(),
+                metadata_json=copy.deepcopy(metadata),
+            )
+            session.add(job)
+            session.add(
+                JobHuntJobLink(
+                    link_id=str(uuid4()),
+                    job_key=job_key,
+                    content_sha256=content_sha256,
+                    job_id=job_id,
+                    created_at=_now(),
+                )
+            )
+            await session.commit()
+            return self._job_to_dict(job), True
+
+    async def get_jobhunt_prepared_description(
+        self, job_key: str
+    ) -> dict[str, Any] | None:
+        """Return the latest manually supplied full description for a source listing."""
+        async with self._session() as session:
+            result = await session.execute(
+                select(Job)
+                .join(JobHuntJobLink, JobHuntJobLink.job_id == Job.job_id)
+                .where(JobHuntJobLink.job_key == job_key)
+                .order_by(JobHuntJobLink.created_at.desc())
+            )
+            for job in result.scalars():
+                metadata = job.metadata_json or {}
+                if not isinstance(metadata, dict):
+                    continue
+                if metadata.get("description_status") in {"complete", "manual"}:
+                    return {
+                        "description_text": job.content,
+                        "description_status": metadata.get("description_status"),
+                        "description_method": metadata.get("description_provenance"),
+                        "description_retrieved_at": job.created_at,
+                    }
+        return None
+
+    async def list_jobhunt_discovery_states(
+        self, job_keys: list[str]
+    ) -> dict[str, str]:
+        """Return saved/skipped states for a bounded discovery page."""
+        if not job_keys:
+            return {}
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(JobHuntDiscoveryState).where(
+                    JobHuntDiscoveryState.job_key.in_(job_keys)
+                )
+            )
+            return {row.job_key: row.pipeline_state for row in rows}
+
+    @staticmethod
+    def _jobhunt_live_job_to_dict(row: JobHuntLiveJob) -> dict[str, Any]:
+        return {
+            "job_key": row.job_key,
+            "canonical_id": row.canonical_id,
+            "provider": row.provider,
+            "source": row.source_name,
+            "title": row.title,
+            "company": row.company,
+            "location": row.location,
+            "source_url": row.source_url,
+            "posted_date": row.posted_date,
+            "description_text": row.description_text,
+            "description_status": row.description_status,
+            "description_method": row.description_method,
+            "description_sha256": row.description_sha256,
+            "retrieved_at": row.retrieved_at,
+            "last_checked_at": row.last_checked_at,
+            "salary": row.salary_json,
+            "fit_score": row.score,
+            "fit_evidence": row.score_json,
+            "metadata": row.metadata_json or {},
+        }
+
+    async def get_jobhunt_search_profile(self) -> dict[str, Any] | None:
+        async with self._session() as session:
+            row = await session.get(JobHuntSearchProfile, 1)
+            return dict(row.profile_json) if row is not None else None
+
+    async def save_jobhunt_search_profile(
+        self, profile: dict[str, Any]
+    ) -> dict[str, Any]:
+        async with self._write_session() as session:
+            row = await session.get(JobHuntSearchProfile, 1)
+            if row is None:
+                row = JobHuntSearchProfile(profile_id=1, profile_json=profile)
+                session.add(row)
+            else:
+                row.profile_json = profile
+                row.updated_at = _now()
+            await session.commit()
+            return dict(row.profile_json)
+
+    @staticmethod
+    def _jobhunt_saved_search_to_dict(row: JobHuntSavedSearch) -> dict[str, Any]:
+        return {
+            "search_id": row.search_id,
+            "name": row.name,
+            "query": row.query,
+            "filters": dict(row.filters_json or {}),
+            "enabled": row.enabled,
+            "interval_minutes": row.interval_minutes,
+            "next_run_at": row.next_run_at,
+            "last_run_at": row.last_run_at,
+            "last_run_status": row.last_run_status,
+            "last_run_id": row.last_run_id,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+    async def create_jobhunt_saved_search(
+        self,
+        *,
+        name: str,
+        query: str | None,
+        filters: dict[str, Any],
+        enabled: bool,
+        interval_minutes: int,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        async with self._write_session() as session:
+            count = await session.scalar(
+                select(func.count()).select_from(JobHuntSavedSearch)
+            )
+            if int(count or 0) >= 20:
+                raise ValueError("At most 20 saved searches are allowed")
+            row = JobHuntSavedSearch(
+                search_id=str(uuid4()),
+                name=name,
+                query=query,
+                filters_json=filters,
+                enabled=enabled,
+                interval_minutes=interval_minutes,
+                next_run_at=(now + timedelta(minutes=interval_minutes)).isoformat()
+                if enabled
+                else None,
+                created_at=now.isoformat(),
+                updated_at=now.isoformat(),
+            )
+            session.add(row)
+            await session.commit()
+            return self._jobhunt_saved_search_to_dict(row)
+
+    async def get_jobhunt_saved_search(self, search_id: str) -> dict[str, Any] | None:
+        async with self._session() as session:
+            row = await session.get(JobHuntSavedSearch, search_id)
+            return self._jobhunt_saved_search_to_dict(row) if row else None
+
+    async def list_jobhunt_saved_searches(self) -> list[dict[str, Any]]:
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(JobHuntSavedSearch).order_by(
+                    JobHuntSavedSearch.created_at.desc()
+                )
+            )
+            return [self._jobhunt_saved_search_to_dict(row) for row in rows]
+
+    async def update_jobhunt_saved_search(
+        self, search_id: str, changes: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc)
+        async with self._write_session() as session:
+            row = await session.get(JobHuntSavedSearch, search_id)
+            if row is None:
+                return None
+            reset_schedule = "interval_minutes" in changes
+            if "name" in changes:
+                row.name = changes["name"]
+            if "query" in changes:
+                row.query = changes["query"]
+            if "filters" in changes:
+                row.filters_json = changes["filters"]
+            if "interval_minutes" in changes:
+                row.interval_minutes = changes["interval_minutes"]
+            if "enabled" in changes:
+                row.enabled = changes["enabled"]
+                reset_schedule = True
+            if not row.enabled:
+                row.next_run_at = None
+            elif reset_schedule or row.next_run_at is None:
+                row.next_run_at = (
+                    now + timedelta(minutes=row.interval_minutes)
+                ).isoformat()
+            row.updated_at = now.isoformat()
+            await session.commit()
+            return self._jobhunt_saved_search_to_dict(row)
+
+    async def delete_jobhunt_saved_search(self, search_id: str) -> bool:
+        async with self._write_session() as session:
+            row = await session.get(JobHuntSavedSearch, search_id)
+            if row is None:
+                return False
+            await session.delete(row)
+            await session.commit()
+            return True
+
+    async def claim_due_jobhunt_saved_searches(
+        self, *, limit: int = 3
+    ) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        async with self._write_session() as session:
+            rows = await session.scalars(
+                select(JobHuntSavedSearch)
+                .where(
+                    JobHuntSavedSearch.enabled.is_(True),
+                    JobHuntSavedSearch.next_run_at.is_not(None),
+                    JobHuntSavedSearch.next_run_at <= now_iso,
+                )
+                .order_by(JobHuntSavedSearch.next_run_at.asc())
+                .limit(limit)
+            )
+            due = list(rows)
+            for row in due:
+                row.next_run_at = (
+                    now + timedelta(minutes=row.interval_minutes)
+                ).isoformat()
+                row.updated_at = now_iso
+            await session.commit()
+            return [self._jobhunt_saved_search_to_dict(row) for row in due]
+
+    async def finish_jobhunt_saved_search(
+        self, *, search_id: str, run_id: str | None, status: str
+    ) -> None:
+        async with self._write_session() as session:
+            row = await session.get(JobHuntSavedSearch, search_id)
+            if row is None:
+                return
+            row.last_run_at = _now()
+            row.last_run_status = status
+            row.last_run_id = run_id
+            row.updated_at = _now()
+            await session.commit()
+
+    async def create_jobhunt_search_run(
+        self, *, run_id: str, queries: list[str], filters: dict[str, Any]
+    ) -> dict[str, Any]:
+        async with self._write_session() as session:
+            row = JobHuntSearchRun(
+                run_id=run_id,
+                queries_json=queries,
+                filters_json=filters,
+                status="running",
+                started_at=_now(),
+            )
+            session.add(row)
+            await session.commit()
+            return {"run_id": row.run_id, "started_at": row.started_at}
+
+    async def finish_jobhunt_search_run(
+        self,
+        *,
+        run_id: str,
+        status: str,
+        found_count: int,
+        new_count: int,
+        errors: list[str],
+    ) -> None:
+        async with self._write_session() as session:
+            row = await session.get(JobHuntSearchRun, run_id)
+            if row is None:
+                return
+            row.status = status
+            row.found_count = found_count
+            row.new_count = new_count
+            row.errors_json = errors
+            row.finished_at = _now()
+            await session.commit()
+
+    async def save_jobhunt_live_jobs(
+        self, jobs: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Idempotently upsert external postings without losing good descriptions."""
+        saved: list[dict[str, Any]] = []
+        new_count = 0
+        async with self._write_session() as session:
+            for item in jobs:
+                row = await session.get(JobHuntLiveJob, item["job_key"])
+                if row is None:
+                    row = JobHuntLiveJob(
+                        job_key=item["job_key"],
+                        provider=item["provider"],
+                        canonical_id=item["canonical_id"],
+                        source_name=item.get("source"),
+                        title=item["title"],
+                        company=item.get("company"),
+                        location=item.get("location"),
+                        source_url=item["source_url"],
+                        posted_date=item.get("posted_date"),
+                        description_text=item.get("description_text"),
+                        description_status=item["description_status"],
+                        description_method=item["description_method"],
+                        description_sha256=item.get("description_sha256"),
+                        retrieved_at=item["retrieved_at"],
+                        last_checked_at=item["last_checked_at"],
+                        salary_json=item.get("salary"),
+                        score=item.get("fit_score"),
+                        score_json=item.get("fit_evidence"),
+                        metadata_json=item.get("metadata") or {},
+                    )
+                    session.add(row)
+                    new_count += 1
+                else:
+                    row.title = item["title"]
+                    row.company = item.get("company")
+                    row.location = item.get("location")
+                    row.source_url = item["source_url"]
+                    row.source_name = item.get("source")
+                    row.posted_date = item.get("posted_date")
+                    row.salary_json = item.get("salary")
+                    row.score = item.get("fit_score")
+                    row.score_json = item.get("fit_evidence")
+                    row.metadata_json = item.get("metadata") or {}
+                    if item.get("description_text"):
+                        old_text = row.description_text or ""
+                        incoming_text = item["description_text"]
+                        if (
+                            row.description_status != "complete"
+                            or item["description_status"] == "complete"
+                            and len(incoming_text) >= len(old_text)
+                        ):
+                            row.description_text = incoming_text
+                            row.description_status = item["description_status"]
+                            row.description_sha256 = item.get("description_sha256")
+                            row.description_method = item["description_method"]
+                            row.retrieved_at = item["retrieved_at"]
+                    row.last_checked_at = item["last_checked_at"]
+                    row.updated_at = _now()
+                saved.append(row)
+            await session.flush()
+            result = [self._jobhunt_live_job_to_dict(row) for row in saved]
+            await session.commit()
+        return result, new_count
+
+    async def get_jobhunt_live_job(self, job_key: str) -> dict[str, Any] | None:
+        async with self._session() as session:
+            row = await session.get(JobHuntLiveJob, job_key)
+            return self._jobhunt_live_job_to_dict(row) if row is not None else None
+
+    async def list_jobhunt_live_jobs(
+        self,
+        *,
+        query: str | None = None,
+        location: str | None = None,
+        min_score: int | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[dict[str, Any]], int]:
+        conditions = []
+        if query:
+            pattern = f"%{query.strip()}%"
+            conditions.append(
+                or_(
+                    JobHuntLiveJob.title.ilike(pattern),
+                    JobHuntLiveJob.company.ilike(pattern),
+                    JobHuntLiveJob.description_text.ilike(pattern),
+                )
+            )
+        if location:
+            conditions.append(JobHuntLiveJob.location.ilike(f"%{location.strip()}%"))
+        if min_score is not None:
+            conditions.append(JobHuntLiveJob.score >= min_score)
+        async with self._session() as session:
+            count = await session.scalar(
+                select(func.count()).select_from(JobHuntLiveJob).where(*conditions)
+            )
+            rows = await session.scalars(
+                select(JobHuntLiveJob)
+                .where(*conditions)
+                .order_by(
+                    JobHuntLiveJob.score.desc().nullslast(),
+                    JobHuntLiveJob.posted_date.desc().nullslast(),
+                    JobHuntLiveJob.last_checked_at.desc(),
+                )
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+            )
+            return (
+                [self._jobhunt_live_job_to_dict(row) for row in rows],
+                int(count or 0),
+            )
+
+    async def list_jobhunt_search_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        async with self._session() as session:
+            rows = await session.scalars(
+                select(JobHuntSearchRun)
+                .order_by(JobHuntSearchRun.started_at.desc())
+                .limit(limit)
+            )
+            return [
+                {
+                    "run_id": row.run_id,
+                    "provider": row.provider,
+                    "queries": row.queries_json,
+                    "filters": row.filters_json,
+                    "status": row.status,
+                    "started_at": row.started_at,
+                    "finished_at": row.finished_at,
+                    "found_count": row.found_count,
+                    "new_count": row.new_count,
+                    "errors": row.errors_json,
+                }
+                for row in rows
+            ]
+
+    async def set_jobhunt_discovery_state(
+        self, job_key: str, pipeline_state: Literal["saved", "skipped"]
+    ) -> dict[str, str]:
+        """Persist user-owned discovery state independently of the source snapshot."""
+        async with self._write_session() as session:
+            row = await session.get(JobHuntDiscoveryState, job_key)
+            if row is None:
+                row = JobHuntDiscoveryState(
+                    job_key=job_key,
+                    pipeline_state=pipeline_state,
+                    updated_at=_now(),
+                )
+                session.add(row)
+            else:
+                row.pipeline_state = pipeline_state
+                row.updated_at = _now()
+            await session.commit()
+            return {"job_key": row.job_key, "pipeline_state": row.pipeline_state}
+
+    async def get_application_by_legacy_id(self, job_key: str) -> dict[str, Any] | None:
+        """Find the tracker card linked to a canonical JobHunt key."""
+        async with self._session() as session:
+            row = await session.scalar(
+                select(Application).where(Application.legacy_application_id == job_key)
+            )
+            return self._application_to_dict(row) if row is not None else None
+
+    async def skip_jobhunt_discovery_job(self, job_key: str) -> bool:
+        """Mark a listing skipped unless a concurrent save already created its card."""
+        async with self._write_session() as session:
+            application = await session.scalar(
+                select(Application).where(Application.legacy_application_id == job_key)
+            )
+            if application is not None:
+                return False
+            state = await session.get(JobHuntDiscoveryState, job_key)
+            if state is None:
+                state = JobHuntDiscoveryState(
+                    job_key=job_key, pipeline_state="skipped", updated_at=_now()
+                )
+                session.add(state)
+            else:
+                state.pipeline_state = "skipped"
+                state.updated_at = _now()
+            await session.commit()
+            return True
+
+    async def import_jobhunt_application(
+        self,
+        *,
+        job_key: str,
+        content: str | None,
+        metadata: dict[str, Any],
+        status: str,
+        company: str | None,
+        role: str,
+        applied_at: str | None,
+        notes: str | None,
+        follow_up_date: str | None,
+        confirmed: bool,
+        legacy_status: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Atomically create a historical JobHunt job and its linked tracker card."""
+        async with self._write_session() as session:
+            existing = await session.scalar(
+                select(Application).where(Application.legacy_application_id == job_key)
+            )
+            if existing is not None:
+                state = await session.get(JobHuntDiscoveryState, job_key)
+                if state is None:
+                    session.add(
+                        JobHuntDiscoveryState(
+                            job_key=job_key,
+                            pipeline_state="saved",
+                            updated_at=_now(),
+                        )
+                    )
+                else:
+                    state.pipeline_state = "saved"
+                    state.updated_at = _now()
+                await session.commit()
+                return self._application_to_dict(existing), False
+            job = Job(
+                job_id=str(uuid4()),
+                content=content,
+                resume_id=None,
+                created_at=_now(),
+                metadata_json=copy.deepcopy(metadata),
+            )
+            session.add(job)
+            await session.flush()
+            application = await self._insert_application(
+                session,
+                job_id=job.job_id,
+                status=status,
+                company=company,
+                role=role,
+                applied_at=applied_at,
+                notes=notes,
+                legacy_application_id=job_key,
+                legacy_status=legacy_status,
+                follow_up_date=follow_up_date,
+                confirmed=confirmed,
+            )
+            session.add(
+                JobHuntDiscoveryState(
+                    job_key=job_key,
+                    pipeline_state="saved",
+                    updated_at=_now(),
+                )
+            )
+            await session.commit()
+            return self._application_to_dict(application), True
+
+    async def attach_jobhunt_tailored_resume(
+        self,
+        *,
+        job_key: str,
+        job_id: str,
+        resume_id: str,
+        master_resume_id: str,
+        company: str | None,
+        role: str | None,
+    ) -> dict[str, Any]:
+        """Attach a tailored resume to the saved source card without marking it applied."""
+        async with self._write_session() as session:
+            row = await session.scalar(
+                select(Application).where(Application.legacy_application_id == job_key)
+            )
+            if row is None:
+                row = await self._insert_application(
+                    session,
+                    job_id=job_id,
+                    resume_id=resume_id,
+                    master_resume_id=master_resume_id,
+                    status="saved",
+                    company=company,
+                    role=role,
+                    legacy_application_id=job_key,
+                )
+            else:
+                row.job_id = job_id
+                row.resume_id = resume_id
+                row.master_resume_id = master_resume_id
+                row.company = company
+                row.role = role
+                row.updated_at = _now()
+                if row.status == "saved":
+                    row.applied_at = None
+            state = await session.get(JobHuntDiscoveryState, job_key)
+            if state is None:
+                session.add(
+                    JobHuntDiscoveryState(
+                        job_key=job_key,
+                        pipeline_state="saved",
+                        updated_at=_now(),
+                    )
+                )
+            else:
+                state.pipeline_state = "saved"
+                state.updated_at = _now()
+            await session.commit()
+            return self._application_to_dict(row)
+
     async def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Get job by ID (dynamic fields flattened to top level)."""
         async with self._session() as session:
@@ -1128,13 +1751,17 @@ class Database:
         session: AsyncSession,
         *,
         job_id: str,
-        resume_id: str,
+        resume_id: str | None = None,
         master_resume_id: str | None = None,
         status: str = "applied",
         company: str | None = None,
         role: str | None = None,
         applied_at: str | None = None,
         notes: str | None = None,
+        legacy_application_id: str | None = None,
+        legacy_status: str | None = None,
+        follow_up_date: str | None = None,
+        confirmed: bool = False,
     ) -> Application:
         """Stage one card with shared date and ordering rules, without committing."""
         now = _now()
@@ -1152,10 +1779,23 @@ class Database:
             applied_at=applied_at,
             notes=notes,
             position=position,
+            legacy_application_id=legacy_application_id,
+            legacy_status=legacy_status,
+            follow_up_date=follow_up_date,
             created_at=now,
             updated_at=now,
         )
         session.add(row)
+        event = ApplicationEvent(
+            event_id=str(uuid4()),
+            application_id=row.application_id,
+            from_status=None,
+            to_status=status,
+            confirmed=confirmed,
+            note=None,
+            created_at=now,
+        )
+        session.add(event)
         return row
 
     async def create_manual_application(
@@ -1167,6 +1807,7 @@ class Database:
         company: str | None = None,
         role: str | None = None,
         notes: str | None = None,
+        confirmed: bool = False,
     ) -> dict[str, Any]:
         """Commit a pasted job and its tracker card together, or roll back both."""
         async with self._write_session() as session:
@@ -1189,6 +1830,7 @@ class Database:
                 company=company,
                 role=role,
                 notes=notes,
+                confirmed=confirmed,
             )
             await session.commit()
             return self._application_to_dict(row)
@@ -1196,35 +1838,37 @@ class Database:
     async def create_application(
         self,
         job_id: str,
-        resume_id: str,
+        resume_id: str | None = None,
         master_resume_id: str | None = None,
         status: str = "applied",
         company: str | None = None,
         role: str | None = None,
         applied_at: str | None = None,
         notes: str | None = None,
+        legacy_application_id: str | None = None,
+        legacy_status: str | None = None,
+        follow_up_date: str | None = None,
+        confirmed: bool = False,
     ) -> dict[str, Any]:
         """Create a tracker card, deduped on (job_id, resume_id).
 
         If a card for the same job+resume already exists it is returned as-is
         (survives double-submit / retried confirms).
         """
+        where_clause = [Application.job_id == job_id]
+        if resume_id is None:
+            where_clause.append(Application.resume_id.is_(None))
+        else:
+            where_clause.append(Application.resume_id == resume_id)
+
         # A replay needs only a read. Recheck under the reservation before an
         # insert so concurrent new cards still share the position allocation.
         async with self._session() as session:
-            found = await session.scalar(
-                select(Application).where(
-                    Application.job_id == job_id, Application.resume_id == resume_id
-                )
-            )
+            found = await session.scalar(select(Application).where(*where_clause))
             if found is not None:
                 return self._application_to_dict(found)
         async with self._write_session() as session:
-            existing = await session.execute(
-                select(Application).where(
-                    Application.job_id == job_id, Application.resume_id == resume_id
-                )
-            )
+            existing = await session.execute(select(Application).where(*where_clause))
             found = existing.scalars().first()
             if found is not None:
                 return self._application_to_dict(found)
@@ -1239,19 +1883,17 @@ class Database:
                 role=role,
                 applied_at=applied_at,
                 notes=notes,
+                legacy_application_id=legacy_application_id,
+                legacy_status=legacy_status,
+                follow_up_date=follow_up_date,
+                confirmed=confirmed,
             )
             try:
                 await session.commit()
             except IntegrityError:
-                # A concurrent create won the (job_id, resume_id) unique
-                # constraint — return the existing card instead of duplicating.
+                # A concurrent create won the unique constraint — return the existing card instead of duplicating.
                 await session.rollback()
-                dup = await session.execute(
-                    select(Application).where(
-                        Application.job_id == job_id,
-                        Application.resume_id == resume_id,
-                    )
-                )
+                dup = await session.execute(select(Application).where(*where_clause))
                 found = dup.scalars().first()
                 if found is not None:
                     logger.debug(
@@ -1298,8 +1940,10 @@ class Database:
             old_status = row.status
             new_status = updates.get("status", old_status)
             target_position = updates.get("position", None)
+            confirmed = bool(updates.get("confirmed", False))
+            note = updates.get("note", None)
 
-            for key in ("company", "role", "applied_at", "notes"):
+            for key in ("company", "role", "applied_at", "notes", "follow_up_date"):
                 if key in updates:
                     setattr(row, key, updates[key])
 
@@ -1310,6 +1954,20 @@ class Database:
                 and "applied_at" not in updates
             ):
                 row.applied_at = _now()
+
+            status_changed = old_status != new_status
+            if status_changed:
+                row.legacy_status = None
+                event = ApplicationEvent(
+                    event_id=str(uuid4()),
+                    application_id=row.application_id,
+                    from_status=old_status,
+                    to_status=new_status,
+                    confirmed=confirmed,
+                    note=note,
+                    created_at=_now(),
+                )
+                session.add(event)
 
             moved = "status" in updates or "position" in updates
             if moved:
@@ -1342,26 +2000,43 @@ class Database:
             return self._application_to_dict(row)
 
     async def bulk_update_applications(
-        self, application_ids: list[str], status: str
+        self,
+        application_ids: list[str],
+        status: str,
+        confirmed: bool = False,
     ) -> int:
         """Move many applications to the end of ``status``. Returns count moved."""
         moved = 0
+        now = _now()
         async with self._write_session() as session:
             affected_old: set[str] = set()
             for application_id in application_ids:
                 row = await session.get(Application, application_id)
                 if row is None:
                     continue
-                affected_old.add(row.status)
+                old_status = row.status
+                if old_status != status:
+                    row.legacy_status = None
+                    event = ApplicationEvent(
+                        event_id=str(uuid4()),
+                        application_id=row.application_id,
+                        from_status=old_status,
+                        to_status=status,
+                        confirmed=confirmed,
+                        note=None,
+                        created_at=now,
+                    )
+                    session.add(event)
+                affected_old.add(old_status)
                 if (
-                    row.status == "saved"
+                    old_status == "saved"
                     and status != "saved"
                     and row.applied_at is None
                 ):
-                    row.applied_at = _now()
+                    row.applied_at = now
                 row.status = status
                 row.position = 20_000_000 + moved  # provisional, renumbered below
-                row.updated_at = _now()
+                row.updated_at = now
                 moved += 1
             await session.flush()
             for old_status in affected_old - {status}:
@@ -1370,6 +2045,150 @@ class Database:
             await session.commit()
         return moved
 
+    async def track_discovery_job(
+        self,
+        *,
+        job_key: str,
+        title: str,
+        company: str | None = None,
+        source_url: str,
+        location: str | None = None,
+        posted_date: str | None = None,
+        description: str | None = None,
+    ) -> dict[str, Any]:
+        """Track a discovery snapshot job into the saved column idempotently."""
+        # Link the tracker card and discovery state under one writer reservation.
+        async with self._write_session() as session:
+            existing = await session.scalar(
+                select(Application).where(Application.legacy_application_id == job_key)
+            )
+            if existing is not None:
+                state = await session.get(JobHuntDiscoveryState, job_key)
+                if state is None:
+                    session.add(
+                        JobHuntDiscoveryState(
+                            job_key=job_key,
+                            pipeline_state="saved",
+                            updated_at=_now(),
+                        )
+                    )
+                else:
+                    state.pipeline_state = "saved"
+                    state.updated_at = _now()
+                await session.commit()
+                return self._application_to_dict(existing)
+
+            meta = {
+                "source": "jobhunt",
+                "source_url": source_url,
+                "title": title,
+                "company": company,
+                "role": title,
+                "location": location,
+                "posted_date": posted_date,
+                "jobhunt_key": job_key,
+            }
+            job_row = Job(
+                job_id=str(uuid4()),
+                content=description,
+                resume_id=None,
+                created_at=_now(),
+                metadata_json=meta,
+            )
+            session.add(job_row)
+            await session.flush()
+
+            app_row = await self._insert_application(
+                session,
+                job_id=job_row.job_id,
+                resume_id=None,
+                master_resume_id=None,
+                status="saved",
+                company=company,
+                role=title,
+                applied_at=None,
+                notes=None,
+                legacy_application_id=job_key,
+                legacy_status=None,
+                follow_up_date=None,
+                confirmed=False,
+            )
+            session.add(
+                JobHuntDiscoveryState(
+                    job_key=job_key,
+                    pipeline_state="saved",
+                    updated_at=_now(),
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                dup = await session.scalar(
+                    select(Application).where(
+                        Application.legacy_application_id == job_key
+                    )
+                )
+                if dup is not None:
+                    return self._application_to_dict(dup)
+                raise
+            return self._application_to_dict(app_row)
+
+    async def list_application_events(
+        self, application_id: str
+    ) -> list[dict[str, Any]]:
+        """List audit events for an application in chronological order."""
+        async with self._session() as session:
+            stmt = (
+                select(ApplicationEvent)
+                .where(ApplicationEvent.application_id == application_id)
+                .order_by(
+                    ApplicationEvent.created_at.asc(), ApplicationEvent.event_id.asc()
+                )
+            )
+            result = await session.execute(stmt)
+            return [
+                self._application_event_to_dict(row) for row in result.scalars().all()
+            ]
+
+    async def get_application_outreach_draft(
+        self, application_id: str
+    ) -> dict[str, Any] | None:
+        async with self._session() as session:
+            row = await session.get(ApplicationOutreachDraft, application_id)
+            if row is None:
+                return None
+            return {
+                "application_id": row.application_id,
+                "content": row.content,
+                "updated_at": row.updated_at,
+            }
+
+    async def save_application_outreach_draft(
+        self, application_id: str, content: str
+    ) -> dict[str, Any] | None:
+        async with self._write_session() as session:
+            application = await session.get(Application, application_id)
+            if application is None:
+                return None
+            row = await session.get(ApplicationOutreachDraft, application_id)
+            if row is None:
+                row = ApplicationOutreachDraft(
+                    application_id=application_id,
+                    content=content,
+                    updated_at=_now(),
+                )
+                session.add(row)
+            else:
+                row.content = content
+                row.updated_at = _now()
+            await session.commit()
+            return {
+                "application_id": row.application_id,
+                "content": row.content,
+                "updated_at": row.updated_at,
+            }
+
     async def delete_application(self, application_id: str) -> bool:
         """Delete an application; renumber its column."""
         async with self._write_session() as session:
@@ -1377,6 +2196,9 @@ class Database:
             if row is None:
                 return False
             status = row.status
+            draft = await session.get(ApplicationOutreachDraft, application_id)
+            if draft is not None:
+                await session.delete(draft)
             await session.delete(row)
             await session.flush()
             await self._renumber(session, status)
@@ -1393,6 +2215,9 @@ class Database:
                 if row is None:
                     continue
                 affected.add(row.status)
+                draft = await session.get(ApplicationOutreachDraft, application_id)
+                if draft is not None:
+                    await session.delete(draft)
                 await session.delete(row)
                 deleted += 1
             await session.flush()

@@ -69,9 +69,19 @@ export function ApplicationCard({
             <p className="truncate font-mono text-xs text-ink-soft">
               {role || t('tracker.card.roleUnknown')}
             </p>
+            {application.legacy_status && (
+              <p className="mt-1 truncate font-mono text-xs text-steel">
+                {t('tracker.card.importedStatus', { status: application.legacy_status })}
+              </p>
+            )}
             {application.applied_at && (
               <p className="mt-1 font-mono text-xs uppercase tracking-wide text-steel tabular-nums">
                 {formatDate(application.applied_at, locale)}
+              </p>
+            )}
+            {application.follow_up_date && (
+              <p className="mt-1 font-mono text-xs text-primary tabular-nums">
+                {t('tracker.modal.followUp')}: {application.follow_up_date}
               </p>
             )}
             {sharedResume && (

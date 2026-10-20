@@ -28,7 +28,7 @@ class ApplicationResponse(BaseModel):
 
     application_id: str
     job_id: str
-    resume_id: str
+    resume_id: str | None = None
     master_resume_id: str | None = None
     status: ApplicationStatus
     company: str | None = None
@@ -38,6 +38,9 @@ class ApplicationResponse(BaseModel):
     position: int
     created_at: str
     updated_at: str
+    legacy_application_id: str | None = None
+    legacy_status: str | None = None
+    follow_up_date: str | None = None
 
 
 class ApplicationDetailResponse(ApplicationResponse):
@@ -69,8 +72,15 @@ class ManualApplicationCreate(BaseModel):
     job_description: str = Field(min_length=1)
     company: str | None = None
     role: str | None = None
-    status: ApplicationStatus = ApplicationStatus.applied
+    status: ApplicationStatus = ApplicationStatus.saved
+    confirmed: bool | None = None
     notes: str | None = None
+
+
+class TrackDiscoveryJobRequest(BaseModel):
+    """Request to track a job discovered from the snapshot into the saved column."""
+
+    job_key: str = Field(min_length=1, max_length=256)
 
 
 class ApplicationUpdate(BaseModel):
@@ -82,6 +92,9 @@ class ApplicationUpdate(BaseModel):
     company: str | None = None
     role: str | None = None
     applied_at: str | None = None
+    follow_up_date: str | None = None
+    confirmed: bool | None = None
+    note: str | None = None
 
     @field_validator("status")
     @classmethod
@@ -91,12 +104,29 @@ class ApplicationUpdate(BaseModel):
             raise ValueError("Status cannot be null")
         return value
 
+    @field_validator("follow_up_date")
+    @classmethod
+    def validate_follow_up_date(cls, value: str | None) -> str | None:
+        """Validate follow-up date as YYYY-MM-DD format."""
+        if value in (None, ""):
+            return None
+        from datetime import date
+
+        try:
+            parsed = date.fromisoformat(value)
+            if parsed.isoformat() != value:
+                raise ValueError
+        except (ValueError, TypeError):
+            raise ValueError("follow_up_date must be a valid date in YYYY-MM-DD format")
+        return value
+
 
 class BulkStatusUpdate(BaseModel):
     """Move many cards to one column."""
 
     application_ids: list[str] = Field(min_length=1)
     status: ApplicationStatus
+    confirmed: bool | None = None
 
 
 class BulkDelete(BaseModel):
@@ -110,3 +140,29 @@ class ApplicationActionResponse(BaseModel):
 
     message: str
     affected: int
+
+
+class ApplicationEventResponse(BaseModel):
+    """An audit trail event for an application status transition."""
+
+    event_id: str
+    application_id: str
+    from_status: str | None = None
+    to_status: str
+    confirmed: bool
+    note: str | None = None
+    created_at: str
+
+
+class ApplicationEventListResponse(BaseModel):
+    items: list[ApplicationEventResponse]
+
+
+class ApplicationOutreachDraftRequest(BaseModel):
+    content: str = Field(max_length=10_000)
+
+
+class ApplicationOutreachDraftResponse(BaseModel):
+    application_id: str
+    content: str
+    updated_at: str | None = None

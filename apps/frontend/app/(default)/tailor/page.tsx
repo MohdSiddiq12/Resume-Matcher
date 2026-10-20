@@ -17,6 +17,7 @@ import type { ATSScore, ImprovedResult } from '@/components/common/resume_previe
 import type { ResumeData } from '@/components/dashboard/resume-component';
 import {
   uploadJobDescriptions,
+  fetchStoredJobDescription,
   previewImproveResume,
   confirmImproveResume,
   fetchResumeList,
@@ -54,11 +55,13 @@ const masterLabel = (m: ResumeListItem) => m.title || m.filename || m.resume_id;
 
 export default function TailorPage() {
   const { t, locale } = useTranslations();
+  const [preparedJobId, setPreparedJobId] = useState<string | null>(null);
   const { begin, isCurrent, invalidate } = useOperationOwner('tailor');
   const confirmedResponses = useRef(new WeakMap<ImprovedResult, ImprovedResult>());
   const countedResumes = useRef(new Set<string>());
   const confirmationBusy = useRef(false);
   const [jobDescription, setJobDescription] = useState('');
+  const [preparedJobLoading, setPreparedJobLoading] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [masterResumeId, setMasterResumeId] = useState<string | null>(null);
@@ -88,7 +91,27 @@ export default function TailorPage() {
 
   useEffect(() => {
     setTailorLength(readTailorLength());
+    setPreparedJobId(new URLSearchParams(window.location.search).get('job_id'));
   }, []);
+
+  useEffect(() => {
+    if (!preparedJobId) return;
+    let cancelled = false;
+    setPreparedJobLoading(true);
+    fetchStoredJobDescription(preparedJobId)
+      .then((job) => {
+        if (!cancelled) setJobDescription(job.content);
+      })
+      .catch(() => {
+        if (!cancelled) setError(t('tailor.errors.previewUnavailable'));
+      })
+      .finally(() => {
+        if (!cancelled) setPreparedJobLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [preparedJobId, t]);
 
   const updateTailorLength = (patch: Partial<TailorLengthSettings>) => {
     const next = { ...tailorLength, ...patch };
@@ -284,9 +307,9 @@ export default function TailorPage() {
       // 1. Upload Job Description
       // The API expects an array of strings
       previewSourceIdRef.current = resumeId;
-      const jobId = await uploadJobDescriptions([description], resumeId);
+      const jobId = preparedJobId ?? (await uploadJobDescriptions([description], resumeId));
       if (!isCurrent(token)) return;
-      incrementJobs(); // Update cached counter
+      if (!preparedJobId) incrementJobs(); // Update cached counter
 
       // 2. Preview Resume
       // Fit pages the way the source resume is formatted.
@@ -636,7 +659,8 @@ export default function TailorPage() {
                 value={jobDescription}
                 onChange={(e) => setJobDescription(e.target.value)}
                 onKeyDown={handleTextareaKeyDown}
-                disabled={isLoading}
+                readOnly={Boolean(preparedJobId)}
+                disabled={isLoading || preparedJobLoading}
               />
               <div className="absolute bottom-2 right-2 font-mono text-xs tabular-nums text-steel pointer-events-none">
                 {t('tailor.charactersCount', { count: jobDescription.length })}

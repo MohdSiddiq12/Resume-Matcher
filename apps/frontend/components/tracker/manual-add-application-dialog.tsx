@@ -12,6 +12,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -38,9 +39,10 @@ export function ManualAddApplicationDialog({
   const [jobDescription, setJobDescription] = useState('');
   const [company, setCompany] = useState('');
   const [role, setRole] = useState('');
-  const [status, setStatus] = useState<ApplicationStatus>('applied');
+  const [status, setStatus] = useState<ApplicationStatus>('saved');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmApplied, setConfirmApplied] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -64,13 +66,17 @@ export function ManualAddApplicationDialog({
     setJobDescription('');
     setCompany('');
     setRole('');
-    setStatus('applied');
+    setStatus('saved');
     setError(null);
   };
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (confirmed = false) => {
     if (!resumeId || !jobDescription.trim()) {
       setError(t('tracker.manualAdd.validation'));
+      return;
+    }
+    if (status !== 'saved' && !confirmed) {
+      setConfirmApplied(true);
       return;
     }
     setSubmitting(true);
@@ -82,6 +88,7 @@ export function ManualAddApplicationDialog({
         company: company.trim() || undefined,
         role: role.trim() || undefined,
         status,
+        confirmed: status !== 'saved' && confirmed,
       });
       reset();
       onCreated();
@@ -165,7 +172,7 @@ export function ManualAddApplicationDialog({
         </DialogBody>
 
         <DialogFooter>
-          <Button type="button" onClick={handleSubmit} disabled={submitting}>
+          <Button type="button" onClick={() => void handleSubmit()} disabled={submitting}>
             {submitting ? (
               <>
                 <SpinnerGap aria-hidden="true" className="animate-spin" />
@@ -177,6 +184,18 @@ export function ManualAddApplicationDialog({
           </Button>
         </DialogFooter>
       </DialogContent>
+      <ConfirmDialog
+        open={confirmApplied}
+        onOpenChange={setConfirmApplied}
+        title={t('tracker.statusConfirm.title')}
+        description={t('tracker.statusConfirm.manualDescription')}
+        confirmLabel={t('tracker.statusConfirm.confirm')}
+        variant="warning"
+        onConfirm={() => {
+          setConfirmApplied(false);
+          void handleSubmit(true);
+        }}
+      />
     </Dialog>
   );
 }

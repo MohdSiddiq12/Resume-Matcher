@@ -144,7 +144,7 @@ async def _auto_create_tracker_application(
     job: dict[str, Any] | None,
     title: str | None,
 ) -> None:
-    """Best-effort: drop an ``applied`` card on the tracker after a tailoring.
+    """Best-effort tracker link after tailoring; discovery imports remain saved.
 
     Company/role come from the cached job (zero extra LLM call). Wrapped so a
     tracker failure can never break the tailoring flow.
@@ -155,14 +155,25 @@ async def _auto_create_tracker_application(
             title = (saved_resume or {}).get("title")
         company = (job or {}).get("company")
         role = title or (job or {}).get("role")
-        await db.create_application(
-            job_id=job_id,
-            resume_id=tailored_resume_id,
-            master_resume_id=master_resume_id,
-            status="applied",
-            company=company,
-            role=role,
-        )
+        if (job or {}).get("source_system") == "jobhunt":
+            await db.attach_jobhunt_tailored_resume(
+                job_key=str(job["source_job_key"]),
+                job_id=job_id,
+                resume_id=tailored_resume_id,
+                master_resume_id=master_resume_id,
+                company=company,
+                role=role,
+            )
+        else:
+            # Preserve Resume Matcher's existing direct-tailoring behavior.
+            await db.create_application(
+                job_id=job_id,
+                resume_id=tailored_resume_id,
+                master_resume_id=master_resume_id,
+                status="applied",
+                company=company,
+                role=role,
+            )
     except Exception as e:  # noqa: BLE001 - tracker is non-critical
         logger.warning("Failed to auto-create tracker application: %s", e)
 

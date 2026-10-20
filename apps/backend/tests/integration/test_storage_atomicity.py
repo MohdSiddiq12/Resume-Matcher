@@ -182,6 +182,8 @@ async def test_null_status_is_rejected_but_omitted_status_and_nullable_notes_wor
     ) as client:
         invalid = await client.patch(url, json={"status": None})
         assert invalid.status_code == 422
+        unconfirmed = await client.patch(url, json={"status": "interview"})
+        assert unconfirmed.status_code == 409
         updated = await client.patch(url, json={"notes": None})
     assert updated.status_code == 200
     assert updated.json()["status"] == "applied"
@@ -256,7 +258,7 @@ async def test_application_dates_stamp_on_application_transition_and_preserve_ma
         job_id="j3", resume_id="r3", status="saved"
     )
     moved = await isolated_db.update_application(
-        first["application_id"], {"status": "applied"}
+        first["application_id"], {"status": "applied", "confirmed": True}
     )
     assert moved is not None and moved["applied_at"] is not None
     await isolated_db.bulk_update_applications(
@@ -287,7 +289,13 @@ async def test_cleared_dates_remain_empty_until_a_new_saved_to_applied_transitio
         if bulk:
             await isolated_db.bulk_update_applications([row_id], status)
         else:
-            await isolated_db.update_application(row_id, {"status": status})
+            await isolated_db.update_application(
+                row_id,
+                {
+                    "status": status,
+                    "confirmed": status in {"applied", "interview"},
+                },
+            )
         result = await isolated_db.get_application(row_id)
         assert result is not None
         return result
@@ -298,7 +306,7 @@ async def test_cleared_dates_remain_empty_until_a_new_saved_to_applied_transitio
     # An explicit clear in the same individual patch always wins over stamping.
     await move("saved")
     explicit_clear = await isolated_db.update_application(
-        row_id, {"status": "applied", "applied_at": None}
+        row_id, {"status": "applied", "applied_at": None, "confirmed": True}
     )
     assert explicit_clear is not None and explicit_clear["applied_at"] is None
 

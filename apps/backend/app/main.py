@@ -13,11 +13,9 @@ from fastapi.responses import JSONResponse
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-logger = logging.getLogger(__name__)
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import __version__
-from app import auth
+from app import __version__, auth
 from app.ai_budget import operation_error_content
 from app.config import settings
 from app.database import DatabaseBusyError, db
@@ -25,18 +23,21 @@ from app.host_guard import HostGuardMiddleware
 from app.pdf import close_pdf_renderer
 from app.routers import (
     applications_router,
-    auth_router,
     ats_router,
+    auth_router,
     chatgpt_callback_router,
     chatgpt_router,
     config_router,
     enrichment_router,
     health_router,
+    jobhunt_discovery_router,
     jobs_router,
     resume_wizard_router,
     resumes_router,
 )
 from app.routers.resumes import drain_processing_cleanup_tasks
+
+logger = logging.getLogger(__name__)
 
 
 def _configure_application_logging() -> None:
@@ -74,10 +75,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from app.services.queue_worker import queue_manager
 
     await queue_manager.start()
+    jobhunt_scheduler_task = None
+    if auth.app_environment() == "development":
+        from app.services.jobhunt_scheduler import scheduler_loop
+
+        jobhunt_scheduler_task = asyncio.create_task(
+            scheduler_loop(), name="jobhunt-saved-search-scheduler"
+        )
     # PDF renderer uses lazy initialization - will initialize on first use
     # await init_pdf_renderer()
     yield
     # Shutdown - wrap each cleanup in try-except to ensure all resources are released
+    if jobhunt_scheduler_task is not None:
+        jobhunt_scheduler_task.cancel()
+        try:
+            await jobhunt_scheduler_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Error stopping the JobHunt search scheduler")
+
     try:
         await queue_manager.stop()
     except Exception:
@@ -135,6 +152,7 @@ app.add_middleware(HostGuardMiddleware, allowed_hosts=settings.effective_allowed
 
 # Include routers
 app.include_router(health_router, prefix="/api/v1")
+app.include_router(jobhunt_discovery_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(config_router, prefix="/api/v1")
 app.include_router(resumes_router, prefix="/api/v1")

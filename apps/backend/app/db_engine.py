@@ -14,7 +14,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.schema import CreateColumn
 
-from app.models import Base, Improvement, Resume
+from app.models import Application, Base, Improvement, Resume
 
 __all__ = [
     "Base",
@@ -22,6 +22,7 @@ __all__ = [
     "init_models_sync",
     "make_async_engine",
     "make_sync_engine",
+    "rebuild_applications_table_sqlite",
 ]
 
 # Advisory-lock namespace ("RM"); the second key is hashtext(<schema>).
@@ -122,6 +123,192 @@ def _init_postgres(engine: Engine, schema: str | None) -> None:
         Base.metadata.create_all(conn)
         _add_missing_column(conn, Improvement.__table__.c.ats_score, schema)
         _add_missing_column(conn, Resume.__table__.c.template_settings, schema)
+        _add_missing_column(conn, Application.__table__.c.legacy_application_id, schema)
+        _add_missing_column(conn, Application.__table__.c.legacy_status, schema)
+        _add_missing_column(conn, Application.__table__.c.follow_up_date, schema)
+        try:
+            conn.exec_driver_sql(
+                "ALTER TABLE applications ALTER COLUMN resume_id DROP NOT NULL"
+            )
+        except Exception:
+            pass
+        try:
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_application_job_untailored "
+                "ON applications (job_id) WHERE resume_id IS NULL"
+            )
+            conn.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_applications_legacy_id "
+                "ON applications (legacy_application_id) WHERE legacy_application_id IS NOT NULL"
+            )
+        except Exception:
+            pass
+
+
+def rebuild_jobs_table_sqlite(conn: Connection) -> dict[str, Any]:
+    """Rebuild SQLite jobs table in a transaction to make content nullable if needed."""
+    columns_info = conn.exec_driver_sql("PRAGMA table_info(jobs)").mappings().all()
+    if not columns_info:
+        return {"rebuilt": False, "reason": "table does not exist"}
+
+    content_col = next((c for c in columns_info if c["name"] == "content"), None)
+    if not content_col or content_col["notnull"] == 0:
+        return {"rebuilt": False, "reason": "already nullable"}
+
+    count_before = conn.exec_driver_sql("SELECT COUNT(*) FROM jobs").scalar() or 0
+
+    conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+    try:
+        conn.exec_driver_sql("""
+            CREATE TABLE jobs__new (
+                job_id VARCHAR NOT NULL PRIMARY KEY,
+                content TEXT,
+                resume_id VARCHAR,
+                created_at VARCHAR NOT NULL,
+                metadata_json JSON NOT NULL
+            )
+        """)
+        conn.exec_driver_sql("""
+            INSERT INTO jobs__new (job_id, content, resume_id, created_at, metadata_json)
+            SELECT job_id, content, resume_id, created_at, metadata_json FROM jobs
+        """)
+        conn.exec_driver_sql("DROP TABLE jobs")
+        conn.exec_driver_sql("ALTER TABLE jobs__new RENAME TO jobs")
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_jobs_resume_id ON jobs (resume_id)"
+        )
+        count_after = conn.exec_driver_sql("SELECT COUNT(*) FROM jobs").scalar() or 0
+        if count_after != count_before:
+            raise RuntimeError(
+                f"Jobs rebuild mismatch: {count_before} vs {count_after}"
+            )
+        fk_errors = conn.exec_driver_sql("PRAGMA foreign_key_check").all()
+        if fk_errors:
+            raise RuntimeError(f"Jobs foreign key check failed: {fk_errors}")
+    finally:
+        conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+    return {"rebuilt": True, "count": count_after}
+
+
+def rebuild_applications_table_sqlite(conn: Connection) -> dict[str, Any]:
+    """Rebuild SQLite applications table in a transaction to make resume_id nullable and add tracking fields.
+
+    Verifies row counts and foreign keys before and after; raises RuntimeError on failure.
+    """
+    columns_info = (
+        conn.exec_driver_sql("PRAGMA table_info(applications)").mappings().all()
+    )
+    if not columns_info:
+        return {"rebuilt": False, "reason": "table does not exist"}
+
+    col_names = {c["name"] for c in columns_info}
+    resume_id_col = next((c for c in columns_info if c["name"] == "resume_id"), None)
+
+    needs_rebuild = False
+    if resume_id_col and resume_id_col["notnull"] == 1:
+        needs_rebuild = True
+    if (
+        "legacy_application_id" not in col_names
+        or "legacy_status" not in col_names
+        or "follow_up_date" not in col_names
+    ):
+        needs_rebuild = True
+
+    if not needs_rebuild:
+        return {"rebuilt": False, "reason": "already up to date"}
+
+    count_before = (
+        conn.exec_driver_sql("SELECT COUNT(*) FROM applications").scalar() or 0
+    )
+
+    conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+    try:
+        conn.exec_driver_sql("""
+            CREATE TABLE applications__new (
+                application_id VARCHAR NOT NULL PRIMARY KEY,
+                job_id VARCHAR NOT NULL,
+                resume_id VARCHAR,
+                master_resume_id VARCHAR,
+                status VARCHAR NOT NULL DEFAULT 'applied',
+                company VARCHAR,
+                role VARCHAR,
+                applied_at VARCHAR,
+                notes TEXT,
+                position INTEGER NOT NULL DEFAULT 0,
+                created_at VARCHAR NOT NULL,
+                updated_at VARCHAR NOT NULL,
+                legacy_application_id VARCHAR,
+                legacy_status VARCHAR,
+                follow_up_date VARCHAR,
+                CONSTRAINT uq_application_job_resume UNIQUE (job_id, resume_id)
+            )
+        """)
+
+        common_cols = [
+            col
+            for col in [
+                "application_id",
+                "job_id",
+                "resume_id",
+                "master_resume_id",
+                "status",
+                "company",
+                "role",
+                "applied_at",
+                "notes",
+                "position",
+                "created_at",
+                "updated_at",
+                "legacy_application_id",
+                "legacy_status",
+                "follow_up_date",
+            ]
+            if col in col_names
+        ]
+        cols_str = ", ".join(common_cols)
+        conn.exec_driver_sql(f"""
+            INSERT INTO applications__new ({cols_str})
+            SELECT {cols_str} FROM applications
+        """)
+
+        conn.exec_driver_sql("DROP TABLE applications")
+        conn.exec_driver_sql("ALTER TABLE applications__new RENAME TO applications")
+
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_applications_job_id ON applications (job_id)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_applications_resume_id ON applications (resume_id)"
+        )
+        conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_applications_status ON applications (status)"
+        )
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_application_job_untailored "
+            "ON applications (job_id) WHERE resume_id IS NULL"
+        )
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_applications_legacy_id "
+            "ON applications (legacy_application_id) WHERE legacy_application_id IS NOT NULL"
+        )
+
+        count_after = (
+            conn.exec_driver_sql("SELECT COUNT(*) FROM applications").scalar() or 0
+        )
+        if count_after != count_before:
+            raise RuntimeError(
+                f"Application table rebuild row count mismatch: before={count_before}, after={count_after}"
+            )
+
+        fk_errors = conn.exec_driver_sql("PRAGMA foreign_key_check").all()
+        if fk_errors:
+            raise RuntimeError(
+                f"Foreign key violations detected after rebuild: {fk_errors}"
+            )
+
+        return {"rebuilt": True, "rows": count_after}
+    finally:
+        conn.exec_driver_sql("PRAGMA foreign_keys = ON")
 
 
 def init_models_sync(engine: Engine, schema: str | None = None) -> None:
@@ -134,6 +321,9 @@ def init_models_sync(engine: Engine, schema: str | None = None) -> None:
     # ``create_all`` does not ALTER existing SQLite tables. Keep this additive
     # migration idempotent so older local databases can load resumes safely.
     with engine.begin() as conn:
+        rebuild_jobs_table_sqlite(conn)
+        rebuild_applications_table_sqlite(conn)
+
         columns = conn.exec_driver_sql("PRAGMA table_info(resumes)").mappings().all()
         existing_columns = {column["name"] for column in columns}
         if columns and "interview_prep" not in existing_columns:
@@ -163,6 +353,14 @@ def init_models_sync(engine: Engine, schema: str | None = None) -> None:
 
         _add_missing_column(conn, Improvement.__table__.c.ats_score)
         _add_missing_column(conn, Resume.__table__.c.template_settings)
+        _add_missing_column(conn, Application.__table__.c.legacy_application_id)
+        _add_missing_column(conn, Application.__table__.c.legacy_status)
+        _add_missing_column(conn, Application.__table__.c.follow_up_date)
+        conn.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_applications_legacy_id "
+            "ON applications (legacy_application_id) "
+            "WHERE legacy_application_id IS NOT NULL"
+        )
 
         preview_columns = (
             conn.exec_driver_sql("PRAGMA table_info(tailoring_previews)")
